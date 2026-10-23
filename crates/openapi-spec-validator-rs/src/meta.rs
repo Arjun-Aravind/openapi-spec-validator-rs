@@ -340,9 +340,26 @@ impl<'i> Keyword<'i> for PythonFormat {
 /// `roots` are the schema resources the failing keyword may live in; the first one
 /// containing the error's absolute keyword location provides the subschema shown in
 /// the verbose "Failed validating ..." rendering.
+///
+/// `instance_root` is the validated value; it disambiguates path segments such as
+/// `200`, which may be a mapping key or a list index.
 pub(crate) fn convert_error(
     error: &jsonschema::ValidationError<'_>,
     roots: &[&Value],
+    instance_root: &Value,
+) -> ValidationError {
+    convert_relative(error, roots, instance_root, &[], &[])
+}
+
+/// Converts `error` with paths relative to its parent error (an `anyOf`/`oneOf` failure),
+/// whose absolute instance path and evaluation path are given, as jsonschema's
+/// `relative_path` / `relative_schema_path` are for errors in `context`.
+fn convert_relative(
+    error: &jsonschema::ValidationError<'_>,
+    roots: &[&Value],
+    instance_root: &Value,
+    parent_instance_path: &[PathItem],
+    parent_evaluation_path: &[PathItem],
 ) -> ValidationError {
     let instance = error.instance().as_ref();
     let location = path_items(error.schema_path());
@@ -357,11 +374,32 @@ pub(crate) fn convert_error(
         .find(|schema| schema.get(&keyword).is_some())
         .cloned()
         .unwrap_or(Value::Null);
+    let evaluation_path = path_items(error.evaluation_path());
+    let instance_path = instance_path_items(error.instance_path(), instance_root);
     // Upstream's relative schema path skips `$ref` hops.
-    let schema_path = path_items(error.evaluation_path())
-        .into_iter()
+    let schema_path = strip_prefix(&evaluation_path, parent_evaluation_path)
+        .iter()
         .filter(|item| !matches!(item, PathItem::Key(key) if key == "$ref"))
+        .cloned()
         .collect();
+    let context = match error.kind() {
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            context
+                .iter()
+                .flatten()
+                .map(|child| {
+                    convert_relative(
+                        child,
+                        roots,
+                        instance_root,
+                        &instance_path,
+                        &evaluation_path,
+                    )
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     let message = python_message(error, instance, &schema);
     ValidationError::from_schema(
         message,
@@ -369,12 +407,44 @@ pub(crate) fn convert_error(
             keyword,
             schema_path,
             schema,
-            instance_path: path_items(error.instance_path()),
+            instance_path: strip_prefix(&instance_path, parent_instance_path).to_vec(),
             instance: instance.clone(),
             cause: None,
-            context: Vec::new(),
+            context,
         },
     )
+}
+
+/// Instance path segments typed by the instance itself: `jsonschema` reports any
+/// numeric segment as an index, but under a mapping it is a key.
+fn instance_path_items(location: &Location, root: &Value) -> Vec<PathItem> {
+    let mut current = Some(root);
+    location
+        .iter()
+        .map(|segment| {
+            let key = match &segment {
+                LocationSegment::Property(key) => key.to_string(),
+                LocationSegment::Index(index) => index.to_string(),
+            };
+            let item = match current {
+                Some(Value::Array(_)) => match key.parse() {
+                    Ok(index) => PathItem::Index(index),
+                    Err(_) => PathItem::Key(key.clone()),
+                },
+                _ => PathItem::Key(key.clone()),
+            };
+            current = match (current, &item) {
+                (Some(Value::Object(map)), PathItem::Key(key)) => map.get(key),
+                (Some(Value::Array(items)), PathItem::Index(index)) => items.get(*index),
+                _ => None,
+            };
+            item
+        })
+        .collect()
+}
+
+fn strip_prefix<'p>(path: &'p [PathItem], prefix: &[PathItem]) -> &'p [PathItem] {
+    path.strip_prefix(prefix).unwrap_or(path)
 }
 
 /// Schema resources a meta-check error can point into.

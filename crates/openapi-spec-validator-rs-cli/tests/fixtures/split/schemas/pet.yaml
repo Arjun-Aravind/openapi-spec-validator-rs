@@ -1,0 +1,8 @@
+type: object
+required: [name]
+allOf:
+  - $ref: "base.yaml"
+properties:
+  age:
+    type: integer
+    default: young

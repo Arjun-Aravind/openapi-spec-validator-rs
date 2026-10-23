@@ -1,0 +1,50 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"--subschema-errors\", \"all\", \"missing-response-description.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/missing-response-description.yaml: Validation Error: {'content': {'application/json': {'schema': {'type': 'string'}}}} is not valid under any of the given schemas
+
+Failed validating 'oneOf' in schema['properties']['paths']['patternProperties']['^\\/']['patternProperties']['^(get|put|post|delete|options|head|patch|trace)$']['properties']['responses']['patternProperties']['^[1-5](?:\\d{2}|XX)$']:
+    {'oneOf': [{'$ref': '#/definitions/Response'},
+               {'$ref': '#/definitions/Reference'}]}
+
+On instance['paths']['/pets']['get']['responses']['200']:
+    {'content': {'application/json': {'schema': {'type': 'string'}}}}
+
+
+# Due to one of those errors
+
+## 'description' is a required property
+
+Failed validating 'required' in schema[0]:
+    {'type': 'object',
+     'required': ['description'],
+     'properties': {'description': {'type': 'string'},
+                    'headers': {'type': 'object',
+                                'additionalProperties': {'oneOf': [{'$ref': '#/definitions/Header'},
+                                                                   {'$ref': '#/definitions/Reference'}]}},
+                    'content': {'type': 'object',
+                                'additionalProperties': {'$ref': '#/definitions/MediaType'}},
+                    'links': {'type': 'object',
+                              'additionalProperties': {'oneOf': [{'$ref': '#/definitions/Link'},
+                                                                 {'$ref': '#/definitions/Reference'}]}}},
+     'patternProperties': {'^x-': {}},
+     'additionalProperties': False}
+
+On instance:
+    {'content': {'application/json': {'schema': {'type': 'string'}}}}
+
+
+## '$ref' is a required property
+
+Failed validating 'required' in schema[1]:
+    {'type': 'object',
+     'required': ['$ref'],
+     'patternProperties': {'^\\$ref$': {'type': 'string',
+                                        'format': 'uri-reference'}}}
+
+On instance:
+    {'content': {'application/json': {'schema': {'type': 'string'}}}}
+----- stderr -----

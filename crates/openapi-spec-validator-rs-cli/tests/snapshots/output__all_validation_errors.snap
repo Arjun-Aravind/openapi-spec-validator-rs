@@ -1,0 +1,54 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"--validation-errors\", \"all\", \"many-errors.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/many-errors.yaml: Validation Error: [1] [{'name': 'pets'}, {'name': 'pets'}] has non-unique elements
+
+Failed validating 'uniqueItems' in schema['properties']['tags']:
+    {'type': 'array',
+     'items': {'$ref': '#/definitions/Tag'},
+     'uniqueItems': True}
+
+On instance['tags']:
+    [{'name': 'pets'}, {'name': 'pets'}]
+tests/fixtures/many-errors.yaml: Validation Error: [2] Duplicate tag name 'pets'
+tests/fixtures/many-errors.yaml: Validation Error: [3] Duplicate parameter 'limit'
+tests/fixtures/many-errors.yaml: Validation Error: [4] Path parameter 'petId' for 'get' operation in '/pets/{petId}' was not resolved
+tests/fixtures/many-errors.yaml: Validation Error: [5] Operation ID 'getPet' for 'get' in '/dogs' is not unique
+tests/fixtures/many-errors.yaml: Validation Error: [6] Required list has not defined properties: ['name']
+tests/fixtures/many-errors.yaml: Validation Error: [7] 9999999999 is not a 'int32'
+
+Failed validating 'format' in schema:
+    {'type': 'integer', 'format': 'int32', 'default': 9999999999}
+
+On instance:
+    9999999999
+tests/fixtures/many-errors.yaml: Validation Error: [8] '25:00:00' is not a 'time'
+
+Failed validating 'format' in schema:
+    {'type': 'string', 'format': 'time', 'default': '25:00:00'}
+
+On instance:
+    '25:00:00'
+
+# Cause
+
+time data '25:00:00' does not match format '%H:%M:%S'
+tests/fixtures/many-errors.yaml: Validation Error: [9] None for not nullable
+
+Failed validating 'type' in schema:
+    {'type': 'string', 'default': None}
+
+On instance:
+    None
+tests/fixtures/many-errors.yaml: Validation Error: [10] None is not of type 'string'
+
+Failed validating 'type' in schema:
+    {'type': 'string', 'default': None}
+
+On instance:
+    None
+tests/fixtures/many-errors.yaml: 10 validation errors found
+----- stderr -----

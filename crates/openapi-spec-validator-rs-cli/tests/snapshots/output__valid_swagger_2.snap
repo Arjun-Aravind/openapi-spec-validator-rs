@@ -1,0 +1,8 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"swagger.yaml\"])"
+---
+exit code: 0
+----- stdout -----
+tests/fixtures/swagger.yaml: OK
+----- stderr -----

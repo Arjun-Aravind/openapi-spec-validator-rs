@@ -631,7 +631,7 @@ impl<'d, 'a> Walker<'d, 'a> {
         let error = validator
             .iter_errors(schema.value)
             .next()
-            .map(|error| meta::convert_error(&error, &meta::meta_check_roots()));
+            .map(|error| meta::convert_error(&error, &meta::meta_check_roots(), schema.value));
         if let Some(message) = error.as_ref().and_then(meta::crash_message) {
             return Err(Stop::Crash(message.to_owned()));
         }

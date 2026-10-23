@@ -1,0 +1,14 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"--schema\", \"3.1\", \"valid.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/valid.yaml: Validation Error: '3.0.3' does not match '^3\\.1\\.\\d+(-.+)?$'
+
+Failed validating 'pattern' in schema['properties']['openapi']:
+    {'type': 'string', 'pattern': '^3\\.1\\.\\d+(-.+)?$'}
+
+On instance['openapi']:
+    '3.0.3'
+----- stderr -----

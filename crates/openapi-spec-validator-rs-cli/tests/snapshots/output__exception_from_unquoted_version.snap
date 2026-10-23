@@ -1,0 +1,8 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"crash-version.yaml\"])"
+---
+exit code: 2
+----- stdout -----
+tests/fixtures/crash-version.yaml: Error: expected string or bytes-like object, got 'float'
+----- stderr -----

@@ -47,7 +47,7 @@ use serde_json::Value;
 use crate::document::Documents;
 use crate::keywords::{Stop, Walker};
 
-pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError};
+pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError, best_match};
 pub use crate::loader::{LoadError, TextErrors, load, load_text};
 pub use crate::version::{DetectError, SpecVersion, detect_version};
 
@@ -89,7 +89,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     if !validator.is_valid(spec) {
         let schema = meta::document_schema(version);
         for error in validator.iter_errors(spec) {
-            errors.push(meta::convert_error(&error, &[schema]));
+            errors.push(meta::convert_error(&error, &[schema], spec));
             if first_only {
                 return Outcome::Invalid(errors);
             }

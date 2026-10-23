@@ -1,0 +1,8 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"crash-path-template.yaml\"])"
+---
+exit code: 2
+----- stdout -----
+tests/fixtures/crash-path-template.yaml: Error: Single '}' encountered in format string
+----- stderr -----

@@ -1,0 +1,16 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"many-errors.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/many-errors.yaml: Validation Error: [{'name': 'pets'}, {'name': 'pets'}] has non-unique elements
+
+Failed validating 'uniqueItems' in schema['properties']['tags']:
+    {'type': 'array',
+     'items': {'$ref': '#/definitions/Tag'},
+     'uniqueItems': True}
+
+On instance['tags']:
+    [{'name': 'pets'}, {'name': 'pets'}]
+----- stderr -----

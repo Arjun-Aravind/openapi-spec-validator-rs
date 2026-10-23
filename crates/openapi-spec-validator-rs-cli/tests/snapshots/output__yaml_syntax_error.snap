@@ -1,0 +1,11 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"broken.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+while parsing a flow mapping
+  in "<urllib response>", line 2, column 7
+did not find expected ',' or '}'
+  in "<urllib response>", line 3, column 6
+----- stderr -----

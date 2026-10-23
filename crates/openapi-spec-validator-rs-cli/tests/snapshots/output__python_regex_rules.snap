@@ -1,0 +1,14 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"bad-regex.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/bad-regex.yaml: Validation Error: '(?<name>[a-z]+)' is not a 'regex'
+
+Failed validating 'format' in schema['properties']['pattern']:
+    {'type': 'string', 'format': 'regex'}
+
+On instance['pattern']:
+    '(?<name>[a-z]+)'
+----- stderr -----

@@ -1,0 +1,9 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"--errors\", \"all\", \"valid.yaml\"])"
+---
+exit code: 0
+----- stdout -----
+tests/fixtures/valid.yaml: OK
+----- stderr -----
+DeprecationWarning: --errors/--error is deprecated. Use --subschema-errors instead.

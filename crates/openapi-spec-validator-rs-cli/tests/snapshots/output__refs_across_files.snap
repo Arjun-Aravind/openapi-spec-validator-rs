@@ -1,0 +1,14 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"split/openapi.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/split/openapi.yaml: Validation Error: 'young' is not of type 'integer'
+
+Failed validating 'type' in schema:
+    {'type': 'integer', 'default': 'young'}
+
+On instance:
+    'young'
+----- stderr -----

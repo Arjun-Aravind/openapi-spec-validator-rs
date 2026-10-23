@@ -1,0 +1,40 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"missing-response-description.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/missing-response-description.yaml: Validation Error: {'content': {'application/json': {'schema': {'type': 'string'}}}} is not valid under any of the given schemas
+
+Failed validating 'oneOf' in schema['properties']['paths']['patternProperties']['^\\/']['patternProperties']['^(get|put|post|delete|options|head|patch|trace)$']['properties']['responses']['patternProperties']['^[1-5](?:\\d{2}|XX)$']:
+    {'oneOf': [{'$ref': '#/definitions/Response'},
+               {'$ref': '#/definitions/Reference'}]}
+
+On instance['paths']['/pets']['get']['responses']['200']:
+    {'content': {'application/json': {'schema': {'type': 'string'}}}}
+
+
+# Probably due to this subschema error
+
+## 'description' is a required property
+
+Failed validating 'required' in schema[0]:
+    {'type': 'object',
+     'required': ['description'],
+     'properties': {'description': {'type': 'string'},
+                    'headers': {'type': 'object',
+                                'additionalProperties': {'oneOf': [{'$ref': '#/definitions/Header'},
+                                                                   {'$ref': '#/definitions/Reference'}]}},
+                    'content': {'type': 'object',
+                                'additionalProperties': {'$ref': '#/definitions/MediaType'}},
+                    'links': {'type': 'object',
+                              'additionalProperties': {'oneOf': [{'$ref': '#/definitions/Link'},
+                                                                 {'$ref': '#/definitions/Reference'}]}}},
+     'patternProperties': {'^x-': {}},
+     'additionalProperties': False}
+
+On instance:
+    {'content': {'application/json': {'schema': {'type': 'string'}}}}
+
+(1 more subschemas errors, use --subschema-errors=all to see them.)
+----- stderr -----

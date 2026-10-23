@@ -1,0 +1,8 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"does-not-exist.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+No such file: tests/fixtures/does-not-exist.yaml
+----- stderr -----

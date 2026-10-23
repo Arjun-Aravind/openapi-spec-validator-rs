@@ -119,7 +119,7 @@ impl<'d, 'a> DefaultValidator<'d, 'a> {
         roots.push(&reference);
         let errors: Vec<ValidationError> = validator
             .iter_errors(value)
-            .map(|error| meta::convert_error(&error, &roots))
+            .map(|error| meta::convert_error(&error, &roots, value))
             .collect();
         if let Some(message) = errors.iter().find_map(meta::crash_message) {
             return Err(Crash(message.to_owned()));

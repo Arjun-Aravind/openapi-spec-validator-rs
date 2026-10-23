@@ -11,8 +11,8 @@ use std::path::Path;
 
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
-    ErrorMode, LoadError, Options, Outcome, SpecVersion, TextErrors, ValidationError, load_text,
-    validate, validate_path,
+    ErrorMode, LoadError, Options, Outcome, SpecVersion, TextErrors, ValidationError, best_match,
+    load_text, validate, validate_path,
 };
 use rayon::prelude::*;
 
@@ -231,7 +231,9 @@ fn print_validation_error(
         }
         SubschemaErrors::BestMatch => {
             writeln!(out, "\n\n# Probably due to this subschema error\n")?;
-            writeln!(out, "## {}", context[0])?;
+            if let Some(best) = best_match(context) {
+                writeln!(out, "## {best}")?;
+            }
             if context.len() > 1 {
                 writeln!(
                     out,
