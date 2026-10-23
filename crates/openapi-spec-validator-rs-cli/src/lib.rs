@@ -193,6 +193,10 @@ fn print_validation_error(
         None => writeln!(out, "{name}: Validation Error: {error}")?,
         Some(index) => writeln!(out, "{name}: Validation Error: [{index}] {error}")?,
     }
+    if let Some(cause) = error.schema_error.as_ref().and_then(|d| d.cause.as_ref()) {
+        writeln!(out, "\n# Cause\n")?;
+        writeln!(out, "{cause}")?;
+    }
     let context = error
         .schema_error
         .as_ref()

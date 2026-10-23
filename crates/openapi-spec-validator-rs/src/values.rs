@@ -252,6 +252,7 @@ struct Oas30Error {
     instance_path: VecDeque<PathItem>,
     schema: Value,
     instance: Value,
+    cause: Option<String>,
     context: Vec<Oas30Error>,
 }
 
@@ -270,6 +271,7 @@ impl Oas30Error {
                 schema: self.schema,
                 instance_path: self.instance_path.into(),
                 instance: self.instance,
+                cause: self.cause,
                 context,
             },
         )
@@ -303,6 +305,7 @@ impl<'d> Oas30<'d, '_, '_> {
                     instance_path: VecDeque::new(),
                     schema: schema.clone(),
                     instance: instance.clone(),
+                    cause: None,
                     context: Vec::new(),
                 });
                 return Ok(());
@@ -356,6 +359,7 @@ impl<'d> Oas30<'d, '_, '_> {
             instance_path: VecDeque::new(),
             schema: Value::Null,
             instance: Value::Null,
+            cause: None,
             context: Vec::new(),
         }
     }

@@ -35,6 +35,9 @@ pub mod pyrepr;
 mod values;
 pub mod version;
 
+#[cfg(test)]
+mod pycompat_tests;
+
 use std::path::Path;
 
 use serde_json::Value;

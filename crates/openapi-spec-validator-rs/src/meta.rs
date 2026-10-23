@@ -350,6 +350,7 @@ pub(crate) fn convert_error(
             schema,
             instance_path: path_items(error.instance_path()),
             instance: instance.clone(),
+            cause: None,
             context: Vec::new(),
         },
     )

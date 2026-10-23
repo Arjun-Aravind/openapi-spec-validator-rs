@@ -65,6 +65,8 @@ pub struct SchemaErrorDetails {
     pub instance_path: Vec<PathItem>,
     /// The failing value (`error.instance`).
     pub instance: Value,
+    /// `str(error.cause)`: the exception a format check raised, if any.
+    pub cause: Option<String>,
     /// Errors from subschemas of `anyOf` / `oneOf` (`error.context`).
     pub context: Vec<ValidationError>,
 }
@@ -95,20 +97,16 @@ impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.schema_error {
             None => f.write_str(&self.message),
-            Some(details) => {
-                let keyword_path = details
-                    .schema_path
-                    .split_last()
-                    .map_or(&[][..], |(_, rest)| rest);
-                f.write_str(&pyrepr::format_validation_error(
-                    &self.message,
-                    &details.keyword,
-                    keyword_path,
-                    &details.schema,
-                    &details.instance_path,
-                    &details.instance,
-                ))
-            }
+            Some(details) => f.write_str(&pyrepr::format_jsonschema_error(
+                pyrepr::ErrorKind::Validation,
+                &self.message,
+                // Errors raised by a `false` schema have no keyword (`validator=None`).
+                (!details.keyword.is_empty()).then_some(details.keyword.as_str()),
+                &details.schema_path,
+                &details.schema,
+                &details.instance_path,
+                &details.instance,
+            )),
         }
     }
 }
