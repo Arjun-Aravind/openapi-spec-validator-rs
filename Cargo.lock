@@ -706,6 +706,7 @@ dependencies = [
  "fancy-regex",
  "jsonschema",
  "percent-encoding",
+ "referencing",
  "serde_json",
  "thiserror",
  "unsafe-libyaml",

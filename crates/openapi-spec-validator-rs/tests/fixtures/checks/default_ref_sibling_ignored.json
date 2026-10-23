@@ -1,0 +1,19 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "t",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "N": {
+        "type": "integer"
+      },
+      "A": {
+        "$ref": "#/components/schemas/N",
+        "default": "x"
+      }
+    }
+  }
+}

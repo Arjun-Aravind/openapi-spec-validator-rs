@@ -1,0 +1,43 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "t",
+    "version": "1"
+  },
+  "paths": {
+    "/a": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "x": {
+                      "$ref": "#/components/schemas/P"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "P": {
+        "required": [
+          "zz"
+        ],
+        "allOf": [
+          {
+            "type": "object"
+          }
+        ]
+      }
+    }
+  }
+}

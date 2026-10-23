@@ -1,0 +1,18 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "t",
+    "version": "1"
+  },
+  "paths": {},
+  "tags": [
+    {
+      "name": "a",
+      "parent": "b"
+    },
+    {
+      "name": "b",
+      "parent": "a"
+    }
+  ]
+}

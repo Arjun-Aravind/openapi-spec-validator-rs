@@ -1,0 +1,25 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "t",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "T": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/T"
+        }
+      },
+      "U": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/T"
+          }
+        ]
+      }
+    }
+  }
+}

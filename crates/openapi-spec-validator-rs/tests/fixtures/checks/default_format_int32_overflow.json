@@ -1,0 +1,17 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "t",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "A": {
+        "type": "integer",
+        "format": "int32",
+        "default": 3000000000
+      }
+    }
+  }
+}

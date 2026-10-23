@@ -1,0 +1,20 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "t",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "A": {
+        "type": "string",
+        "enum": [
+          "a",
+          "b"
+        ],
+        "default": "c"
+      }
+    }
+  }
+}
