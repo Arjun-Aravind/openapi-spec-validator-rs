@@ -1,0 +1,24 @@
+[package]
+name = "openapi-spec-validator-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+include = ["src/**/*", "resources/**/*"]
+
+[lib]
+name = "openapi_spec_validator_rs"
+
+[dependencies]
+base64.workspace = true
+fancy-regex.workspace = true
+jsonschema.workspace = true
+percent-encoding.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+unsafe-libyaml.workspace = true
+url.workspace = true

@@ -1,0 +1,27 @@
+# Rust
+/target
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+/dist
+.pytest_cache/
+/.venv*
+
+# Reference checkout of the Python implementation (cloned locally for tests)
+/upstream
+
+# Local working notes and downloaded data
+/QUEUE.md
+/phase0
+/bench/data
+/bench/results
+
+# Editor and tool state
+.claude/
+.idea/
+.vscode/
+.DS_Store

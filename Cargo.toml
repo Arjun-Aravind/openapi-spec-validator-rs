@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = [
+    "crates/openapi-spec-validator-rs",
+    "crates/openapi-spec-validator-rs-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "A fast, drop-in Rust companion to openapi-spec-validator."
+keywords = ["openapi", "swagger", "validation", "jsonschema"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
+
+[workspace.dependencies]
+openapi-spec-validator-rs = { path = "crates/openapi-spec-validator-rs", version = "0.1.0" }
+openapi-spec-validator-rs-cli = { path = "crates/openapi-spec-validator-rs-cli", version = "0.1.0" }
+
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+fancy-regex = "0.19.2"
+insta = "1.49.0"
+jsonschema = { version = "0.60.1", default-features = false }
+percent-encoding = "2.3.2"
+pyo3 = { version = "0.30.1", features = ["abi3-py310"] }
+rayon = "1.12.0"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+unsafe-libyaml = "0.2.11"
+url = "2.5.8"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.profiling]
+inherits = "release"
+debug = true

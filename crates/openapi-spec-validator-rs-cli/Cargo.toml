@@ -1,0 +1,25 @@
+[package]
+name = "openapi-spec-validator-rs-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line interface for openapi-spec-validator-rs."
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[lib]
+name = "openapi_spec_validator_rs_cli"
+
+[[bin]]
+name = "openapi-spec-validator-rs"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+openapi-spec-validator-rs.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

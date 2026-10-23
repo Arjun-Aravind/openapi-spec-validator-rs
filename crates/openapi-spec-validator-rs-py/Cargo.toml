@@ -1,0 +1,18 @@
+[package]
+name = "openapi-spec-validator-rs-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for openapi-spec-validator-rs."
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+openapi-spec-validator-rs.workspace = true
+openapi-spec-validator-rs-cli.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,3 @@
+__version__: str
+
+def cli_main(args: list[str]) -> tuple[int, str, str]: ...

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "openapi-spec-validator-rs"
+description = "A fast, drop-in Rust companion to openapi-spec-validator."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.10"
+keywords = ["openapi", "swagger", "validation", "schema", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.scripts]
+openapi-spec-validator-rs = "openapi_spec_validator_rs.__main__:main"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9,<2.0",
+    "pytest>=8",
+    "openapi-spec-validator==0.9.0",
+]
+
+[tool.maturin]
+manifest-path = "crates/openapi-spec-validator-rs-py/Cargo.toml"
+python-source = "python"
+module-name = "openapi_spec_validator_rs._core"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
