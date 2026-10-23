@@ -86,3 +86,76 @@ These behaviours look surprising but are reproduced on purpose:
 | Error messages | Messages follow upstream's wording; the "Failed validating ..." detail block and best-match subschema hints may differ in places. For errors at the top level of the document, upstream prints its meta-schema as `<Proxy at 0x... wrapping {...}>`, including a memory address, which cannot be reproduced. | Output text only |
 | Set ordering | Upstream prints multiple undefined `required` properties, and unexpected additional properties, in Python set order (which varies between runs). This port uses document order. | Output text only |
 | Upstream with `jsonschema-rs` installed | Upstream switches to its optional `jsonschema-rs` backend automatically when that package is installed. That backend also checks `format` across the whole document, with ECMAScript regex rules, so for example `pattern: "(?P<n>a)"` fails there but passes the default backend. This port follows the default backend. | Specs with `format` violations outside schemas |
+
+## Python API
+
+The `openapi_spec_validator_rs` package mirrors upstream's public Python API, and
+upstream's own test suite runs against it unmodified through a shim package
+(`python tests/run_upstream_suite.py`). The tests that cannot pass are listed with their
+reasons in `tests/upstream_shim/upstream_suite.py`; they are the differences below.
+
+| Upstream | This package |
+|---|---|
+| `validate(spec, base_uri="", cls=None)` | Same |
+| `validate_url(spec_url, cls=None)` | Same: fetched with `urllib.request.urlopen` (`http`, `https`, `file`) and parsed exactly as upstream parses it. `cls` only selects the version. |
+| | `validate_path(path, cls=None)`: reads a file like the command line, resolving relative `$ref`s against it |
+| `validate_spec`, `validate_spec_url` (deprecated) | Same, with the same warnings (and, like upstream, `validate_spec` ignores `base_uri` unless `validator` is given) |
+| `OpenAPIV2SpecValidator`, `OpenAPIV30SpecValidator`, `OpenAPIV31SpecValidator`, `OpenAPIV32SpecValidator`, `OpenAPIV3SpecValidator` | Same constructor `(schema, base_uri="")` and `validate()`, `is_valid()`, `iter_errors()`. A jsonschema-path `SchemaPath` is accepted too. |
+| `openapi_v2_spec_validator`, `openapi_v30_spec_validator`, ... (deprecated) | Same |
+| `get_validator_cls`, `versions.get_spec_version`, `SpecVersion`, `OPENAPIV2` ... `OPENAPIV32` | Same |
+| `OpenAPISpecValidatorError`, `ValidatorDetectError`, `OpenAPIValidationError`, `ExtraParametersError`, `ParameterDuplicateError`, `UnresolvableParameterError`, `DuplicateOperationIDError` | Same names and hierarchy, in `openapi_spec_validator_rs.exceptions` and at the top level |
+
+### Exceptions
+
+`OpenAPIValidationError` derives from `openapi_spec_validator_rs.exceptions.ValidationError`
+instead of `jsonschema.exceptions.ValidationError` (there is no jsonschema dependency). It
+has jsonschema's attributes — `message`, `validator`, `validator_value`, `instance`,
+`schema`, `path` / `relative_path`, `schema_path` / `relative_schema_path`,
+`absolute_path`, `absolute_schema_path`, `json_path`, `context`, `cause`, `parent` — and the
+same `str()`. `context` holds plain `ValidationError`s, as upstream's does. `cause` is an
+`Exception` carrying the text of the exception the format check raised. `instance` and
+`schema` are copies of the document's values, not the objects passed in.
+
+Where upstream raises something other than a validation error, this package raises:
+
+| Upstream raises | This package raises |
+|---|---|
+| `ValidatorDetectError` (no supported version) | `ValidatorDetectError` |
+| `TypeError` from version detection (non-string version, document not a mapping) | `TypeError`, same message |
+| Any other exception while validating: `referencing.exceptions.Unresolvable` (and its `PointerToNowhere`, `InvalidAnchor`, ...), `RecursionError`, `ValueError` for malformed path templates, `KeyError`, ... | `ValidationAbortedError` (an `OpenAPISpecValidatorError`), same message. This is what the CLI prints as `Error: ...` with exit status 2. |
+| PyYAML's or `json`'s exceptions while reading (`validate_url`, `validate_path`) | `SpecReadError` (an `OpenAPISpecValidatorError`), same message |
+| `OSError("No such file: ...")` from the CLI's reader | `validate_path`: `FileNotFoundError`, same message |
+
+### Documents passed as Python objects
+
+Documents are read the way `json.loads` output looks: `dict` with `str` keys, `list`,
+`str`, `int`, `float`, `bool` and `None`, including subclasses (`OrderedDict`, `StrEnum`,
+`IntEnum`, ...). Beyond that:
+
+| Input | This package | Upstream |
+|---|---|---|
+| `tuple` | An array | Not an array to jsonschema, so a type error wherever an array is expected |
+| NaN, ±infinity | `null`, like the file reader (see above) | Kept as floats |
+| Integers beyond 64 bits | The nearest float, like the file reader | Kept as integers |
+| Non-`str` keys (e.g. `200:` from `yaml.safe_load`) | `TypeError` naming the location | A `TypeError` from jsonschema in most positions, accepted where no schema applies |
+| Other types (`set`, `bytes`, `datetime`, `Decimal`, custom objects) | `TypeError` naming the location | Accepted where no schema applies (e.g. in extensions), type errors elsewhere |
+| Circular structures | `ValueError` | Accepted where no schema applies |
+| More than 9,989 nested containers | `RecursionError` | Depends on where the nesting is |
+
+### Other differences
+
+* Upstream's settings (`OPENAPI_SPEC_VALIDATOR_RESOLVED_CACHE_MAXSIZE`,
+  `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND`) do not apply: validation always
+  follows the default `jsonschema` backend.
+* Custom formats registered with openapi-schema-validator's format checkers
+  (`oas30_format_checker.checks(...)`) are not seen.
+* `iter_errors()` validates when iteration starts. If validation aborts, the
+  `ValidationAbortedError` is raised before any error is yielded; upstream first yields
+  the errors it found before the failure.
+* Results are not cached per validator: every call validates the document as it is at
+  that moment (upstream caches `iter_errors()` per instance).
+* `openapi_spec_validator_rs.__main__.main()` returns normally when every file is valid
+  and raises `SystemExit` otherwise, like upstream's, but it reads `-` from the process's
+  standard input, not from a replaced `sys.stdin`. Program name, version and argument
+  error messages are this package's own (clap's instead of argparse's).
+* The GIL is released while documents are loaded, validated and errors rendered.

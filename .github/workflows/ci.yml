@@ -71,4 +71,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install maturin pytest "openapi-spec-validator==$UPSTREAM_VERSION"
           python -m pip install -e . -v
-      - run: python -m pytest
+      - name: Python API tests
+        run: python -m pytest --deselect tests/test_upstream_suite.py::test_upstream_suite
+      # Upstream's own tests through the `openapi_spec_validator` shim; expected failures
+      # are listed with their reasons in tests/upstream_shim/upstream_suite.py.
+      - name: Upstream test suite (network tests deselected)
+        run: python tests/run_upstream_suite.py -m "not network" -rxX

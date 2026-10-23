@@ -727,6 +727,7 @@ dependencies = [
 name = "openapi-spec-validator-rs-py"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "openapi-spec-validator-rs",
  "openapi-spec-validator-rs-cli",
  "pyo3",

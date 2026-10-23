@@ -1,0 +1,96 @@
+name: Wheels
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wheels:
+    name: wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64
+          - name: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64
+          - name: windows-x64
+            runner: windows-latest
+            target: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # One abi3 wheel per platform covers CPython 3.10 and later.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Smoke test the wheel
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links dist openapi-spec-validator-rs
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/tests/wheel_smoke.py"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: dtolnay/rust-toolchain@stable
+      # Builds from the sdist alone, which catches files missing from it.
+      - name: Build and smoke test from the sdist
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "off"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: |
+          python -m pip install dist/*.tar.gz
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/tests/wheel_smoke.py"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+          if-no-files-found: error
+
+  # Publishing is manual: download the `wheels-*` and `sdist` artifacts of a tagged
+  # run, check them, and upload them with `twine upload` (or `maturin upload`).
+  # There is deliberately no publish job here.
