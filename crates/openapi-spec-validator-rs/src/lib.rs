@@ -46,7 +46,7 @@ use crate::document::Documents;
 use crate::keywords::{Stop, Walker};
 
 pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError};
-pub use crate::loader::{LoadError, load};
+pub use crate::loader::{LoadError, TextErrors, load, load_text};
 pub use crate::version::{DetectError, SpecVersion, detect_version};
 
 /// How many errors to collect.
@@ -122,7 +122,8 @@ pub fn validate_path(path: &Path, options: &Options) -> Result<Outcome, LoadErro
     let bytes = std::fs::read(&absolute).map_err(|error| LoadError {
         message: error.to_string(),
     })?;
-    let spec = load(&bytes, &absolute.to_string_lossy())?;
+    // Upstream reads files through `urlopen`, which is the stream name PyYAML reports.
+    let spec = load(&bytes, "<urllib response>")?;
     let mut options = options.clone();
     if options.base_uri.is_empty() {
         options.base_uri = url::Url::from_file_path(&absolute)

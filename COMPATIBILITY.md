@@ -61,6 +61,8 @@ These behaviours look surprising but are reproduced on purpose:
 | Behaviour | Example |
 |---|---|
 | JSON files are parsed as YAML 1.1 and round-tripped through `json.dumps` | `yes` → `true`, `017` → `15`, unquoted `200:` keys become `"200"` |
+| JSON that libyaml cannot read is a read error, even if it is valid JSON | `"😀"` (how Python's `json.dump` writes emoji), tabs outside brackets, keys over 1022 characters |
+| Read errors name the stream `<urllib response>` (upstream reads files through `urlopen`) | `while parsing a block mapping\n  in "<urllib response>", line 1, column 1` |
 | A non-string version is an error (exit 2), not a validation error | `swagger: 2.0` → `Error: expected string or bytes-like object, got 'float'` |
 | An unknown version is an error with an empty message | `openapi: 4.0.0` → `Error: ` |
 | `$ref` cycles, and cycles through `allOf`/`items` in `required` checks, hit Python's recursion limit | `Error: maximum recursion depth exceeded` |

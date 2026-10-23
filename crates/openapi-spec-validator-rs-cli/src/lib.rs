@@ -11,8 +11,8 @@ use std::path::Path;
 
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
-    ErrorMode, LoadError, Options, Outcome, SpecVersion, ValidationError, load, validate,
-    validate_path,
+    ErrorMode, LoadError, Options, Outcome, SpecVersion, TextErrors, ValidationError, load_text,
+    validate, validate_path,
 };
 use rayon::prelude::*;
 
@@ -168,7 +168,7 @@ fn validate_file(file: &str, options: &Options) -> FileResult {
             .map_err(|error| LoadError {
                 message: error.to_string(),
             })
-            .and_then(|_| load(&bytes, "<stdin>"))
+            .and_then(|_| load_text(&bytes, "<stdin>", stdin_errors()))
             .map(|spec| validate(&spec, options));
         return FileResult {
             name: "stdin".to_owned(),
@@ -178,6 +178,24 @@ fn validate_file(file: &str, options: &Options) -> FileResult {
     FileResult {
         name: file.to_owned(),
         result: validate_path(Path::new(file), options),
+    }
+}
+
+/// The error handler of Python's `sys.stdin`: `surrogateescape` in UTF-8 mode or under the
+/// C/POSIX locale, `strict` otherwise. It decides how undecodable input is reported.
+fn stdin_errors() -> TextErrors {
+    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    if env("PYTHONUTF8").as_deref() == Some("1") {
+        return TextErrors::SurrogateEscape;
+    }
+    let locale = env("LC_ALL")
+        .or_else(|| env("LC_CTYPE"))
+        .or_else(|| env("LANG"))
+        .unwrap_or_else(|| "C".to_owned());
+    if locale == "C" || locale == "POSIX" || locale.starts_with("C.") {
+        TextErrors::SurrogateEscape
+    } else {
+        TextErrors::Strict
     }
 }
 

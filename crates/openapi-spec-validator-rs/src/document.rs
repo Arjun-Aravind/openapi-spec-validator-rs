@@ -389,7 +389,7 @@ fn retrieve(uri: &str, reference: &str) -> Result<Value, String> {
     }
     let path = url.to_file_path().map_err(|()| unresolvable())?;
     let bytes = std::fs::read(&path).map_err(|_| unresolvable())?;
-    loader::load(&bytes, &path.to_string_lossy()).map_err(|error| error.message)
+    loader::load(&bytes, "<urllib response>").map_err(|error| error.message)
 }
 
 #[cfg(test)]

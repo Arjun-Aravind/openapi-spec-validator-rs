@@ -1,0 +1,345 @@
+"""Generate the loader test corpus from openapi-spec-validator's real readers.
+
+Usage (in an environment with openapi-spec-validator 0.9.0 installed):
+    python -I scripts/loader/gen_fixtures.py
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from upstream import BS, load_file, load_stdin, run_cli  # noqa: E402
+
+FILE = "file"
+STRICT = "text-strict"
+ESCAPE = "text-surrogateescape"
+
+
+def esc(code: str) -> str:
+    """A JSON/YAML backslash-u escape, e.g. esc('00e9')."""
+    return BS + "u" + code
+
+
+def b(s: str) -> bytes:
+    return s.encode("utf-8")
+
+
+CASES = []
+
+
+def case(name, data, modes=(FILE,), depth=None):
+    """`depth`: the nesting depth of a deep input; its expectation comes from the real CLI,
+    because the recursion limit depends on the CLI's own call stack."""
+    if isinstance(data, str):
+        data = b(data)
+    CASES.append((name, data, modes, depth))
+
+
+# --- JSON documents (fast path and its fallbacks) -------------------------------------------
+case("json_object", '{"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": {}}')
+case("json_nested", '{"a": [1, [2, [3, {"b": [], "c": {}}]]], "d": [{"e": null}]}')
+case("json_duplicates", '{"a": 1, "b": 2, "a": 3}')
+case("json_duplicate_nested", '{"x": {"a": 1}, "y": 2, "x": [1]}')
+case("json_ints", "[0, 1, -1, 9223372036854775807, -9223372036854775808, 18446744073709551615]")
+case("json_big_ints", "[18446744073709551616, -9223372036854775809, 123456789012345678901234567890]")
+case("json_neg_zero", '{"a": -0, "b": [-0], "c": -0.0, "d": 0.0}')
+case("json_floats", "[1.5, 0.1, 100.0, 1e5, 1E5, 1e+5, 1.5e5, 1.5E-5, -2.5e-3, 6.02e23]")
+case("json_floats_unsafe", "[0.12345678901234567890, 1.7976931348623157e308, 2.2250738585072014e-308, "
+     "4.9e-324, 123456789012345678.5, 1e23, 8.98846567431158e307, 3.4028235e38, 9007199254740993.0]")
+case("json_floats_unsafe_dup", '{"a": 1.7976931348623157e308, "a": 0.30000000000000004441, "b": 1e23}')
+case("json_float_overflow", "[1e400, -1e400, 1e-400]")
+case("json_escapes", '{"s": "' + BS + '"' + BS + BS + BS + "/" + BS + "b" + BS + "f" + BS + "n" + BS + "r"
+     + BS + "t" + esc("0041") + esc("00e9") + esc("0000") + esc("001f") + esc("2028") + esc("ffff") + '"}')
+case("json_surrogate_pair", '{"emoji": "' + esc("d83d") + esc("de00") + '"}')
+case("json_surrogate_pair_upper", '["' + esc("D83D") + esc("DE00") + '"]')
+case("json_lone_high_surrogate", '["' + esc("d800") + '"]')
+case("json_lone_low_surrogate", '["x' + esc("dfff") + '"]')
+case("json_raw_unicode", '{"é": "日本語 😀 ünïcödé", "k": "' + chr(0xA0) + chr(0x3000) + '"}')
+case("json_raw_nel", '{"a": "x' + chr(0x85) + 'y"}')
+case("json_raw_ls_ps", '{"a": "x ' + chr(0x2028) + ' y' + chr(0x2029) + 'z"}')
+case("json_raw_del", '{"a": "x' + chr(0x7F) + '"}')
+case("json_raw_c1", '{"a": "x' + chr(0x9F) + '"}')
+case("json_raw_fffe", '{"a": "' + chr(0xFFFE) + '"}')
+case("json_raw_bom_inside", '{"a": "x' + chr(0xFEFF) + 'y"}')
+case("json_leading_tab", '\t{"a": 1}')
+case("json_trailing_tab_same_line", '{"a": 1}\t\n')
+case("json_tab_next_line", '{"a": 1}\n\t\n')
+case("json_tab_indented", '{\n\t"a": {\n\t\t"b": [\n\t\t\t1,\n\t\t\t2\n\t\t]\n\t}\n}\n')
+case("json_key_1022", '{"' + "k" * 1022 + '": 1}')
+case("json_key_1023", '{"' + "k" * 1023 + '": 1}')
+case("json_key_1021_ws2", '{"' + "k" * 1021 + '"  : 1}')
+case("json_key_nonascii_1022", '{"' + "é" * 1022 + '": 1}')
+case("json_key_escape_long", '{"' + esc("0041") * 171 + '": 1}')
+case("json_value_long", '{"k": "' + "v" * 5000 + '"}')
+case("json_key_newline_colon", '{"a"\n: 1}')
+case("json_key_cr_colon", '{"a"\r: 1}')
+case("json_value_on_next_line", '{"a":\n  1}')
+case("json_bom", b"\xef\xbb\xbf" + b('{"a": 1}'))
+case("json_crlf", '{\r\n  "a": [1,\r\n 2]\r\n}\r\n')
+case("json_cr_only", '{\r  "a": 1\r}\r')
+case("json_top_string", '"hello"')
+case("json_top_int", "  42  \n")
+case("json_top_neg_zero", "-0")
+case("json_top_float", "1.25")
+case("json_top_true", "true")
+case("json_top_null", "null")
+case("json_empty_containers", '{"a": [], "b": {}, "c": [[]], "d": [{}]}')
+case("json_yamlish_keys", '{"<<": {"a": 1}, "=": "=", "~": null, "yes": "no", "1": "one", "true": 1}')
+case("json_trailing_comma", '[1, 2,]')
+case("json_comment", '{"a": 1} # comment\n')
+case("json_deep_200", "[" * 200 + "]" * 200, depth=200)
+case("json_deep_9989", "[" * 9989 + "]" * 9989, depth=9989)
+case("json_deep_9990", "[" * 9990 + "]" * 9990, depth=9990)
+case("json_deep_dict_9990", '{"a":' * 9990 + "1" + "}" * 9990, depth=9990)
+case("json_whitespace_only", "  \n ")
+case("json_two_values", '{"a": 1}\n{"b": 2}')
+
+# --- implicit resolution --------------------------------------------------------------------
+case("bools", "[yes, Yes, YES, no, No, NO, true, True, TRUE, false, False, FALSE, on, On, ON, off, Off, OFF, y, n, tRUE, nO]")
+case("nulls", "a: ~\nb: null\nc: Null\nd: NULL\ne:\nf: nULL\ng: ''\n")
+case("ints", "a: 0\nb: -0\nc: +12_345\nd: 0b1010_0111\ne: -0b11\nf: 017\ng: 0_\nh: 0x_FF\ni: -0x1f\nj: 1:30\nk: -1:30:00\nl: 190:20:30\n")
+case("int_lookalikes", "a: 08\nb: 0X1F\nc: 0B1\nd: 1:60\ne: 1:3:\nf: 0o17\ng: 1_\nh: _1\n")
+case("floats", "a: 1.5\nb: 1.\nc: .5\nd: -1.5e+3\ne: 1:30.5\nf: 1_000.5\ng: 6.02E+23\nh: 0.1e-2\ni: 190:20:30.15\n")
+case("float_specials", "a: .inf\nb: -.Inf\nc: +.INF\nd: .nan\ne: .NaN\nf: -.nan\ng: .Nan\n")
+case("scientific", "a: 1e5\nb: 1E5\nc: 1.5e5\nd: -.5e3\ne: 1e-5\nf: 1_0e5\ng: 01e5\nh: 1e\ni: .e5\nj: 0.e1\n")
+case("version_like", "swagger: 2.0\nopenapi: 3.0.0\nx: 1.10\ny: 3.1\nz: '3.0'\n")
+case("timestamps_are_strings", "a: 2020-01-01\nb: 2001-12-14t21:59:43.10-05:00\nc: 2001-12-14 21:59:43.10 -5\n")
+case("plain_specials", "a: <<x\nb: ==\nc: ~x\nd: yes!\ne: '-'\nf: -\ng: .\nh: +\n")
+case("numeric_keys", "200:\n  d: ok\n404: x\n1.5: f\n0x1F: h\n1e3: s\n-0: z\n")
+case("special_keys", "yes: a\n~: b\nnull: c\n.inf: d\n-.inf: e\n.nan: f\n1e16: g\n0.00001: h\n1e15: i\n")
+case("key_dedup_int_bool", "{1: a, true: b}")
+case("key_dedup_bool_int", "{true: b, 1: a}")
+case("key_dedup_int_float", "{1: a, 1.0: b}")
+case("key_dedup_zeroes", "{0: a, -0.0: b, false: c}")
+case("key_dedup_nulls", "{null: a, ~: b, '': c}")
+case("key_str_vs_int", "{'1': a, 1: b, 'true': c, true: d}")
+case("key_float_vs_int_big", "{1e20: a, 100000000000000000000: b, 9007199254740993: c, 9007199254740992.0: d}")
+case("key_nan_shared", "{.nan: !!binary aGk=, .nan: 1}")
+case("key_nan_fresh", "{!!float nan: !!binary aGk=, !!float nan: 1}")
+case("key_nan_alias", "{&n !!float nan : !!binary aGk=, *n : 1}")
+case("key_big_int", "{18446744073709551616: a, 0xffffffffffffffffffff: b}")
+case("big_ints", "a: 18446744073709551616\nb: -18446744073709551616\nc: 0x" + "f" * 40 + "\nd: 9" * 1 + "9" * 300 + "\n")
+case("int_digit_limit_ok", "a: " + "9" * 4300 + "\n")
+case("int_digit_limit_bad", "a: " + "9" * 4301 + "\n")
+case("int_hex_too_long_to_print", "a: 0x" + "f" * 3600 + "\n")
+case("int_key_too_long_to_print", "? 0x" + "f" * 3600 + "\n: 1\n")
+case("int_out_of_float_range", "a: " + "9" * 400 + "\n")
+
+# --- scalars and styles ---------------------------------------------------------------------
+case("quoted_styles", "a: 'it''s'\nb: \"x" + BS + "ty\"\nc: \"" + BS + "x41" + esc("00e9") + BS + "U0001F600" + BS + "N" + BS + "_" + BS + "L" + BS + "P" + BS + "e" + BS + "0\"\n")
+case("quoted_folding", "a: \"one\n  two\n\n  three\"\nb: 'x\n\n\n  y'\n")
+case("block_scalars", "a: |\n  line1\n  line2\nb: >\n  folded\n  text\n\n  para\nc: |-\n  strip\nd: |+\n  keep\n\ne: >2\n   indented\n")
+case("plain_multiline", "a: one\n  two\n\n  three\nb: x # comment\n")
+case("non_specific_tag", "a: ! 123\nb: ! '*'\n")
+case("non_specific_literal", "! |\n  123\n")
+case("crlf_lines", "a: 1\r\nb: |\r\n  x\r\n  y\r\nc: \"p\r\n  q\"\r\n")
+case("cr_lines", "a: 1\rb: 2\r")
+case("bom_start", b"\xef\xbb\xbf" + b("a: 1\n"))
+case("bom_each_line", b"\xef\xbb\xbfa: 1\n\xef\xbb\xbfb: 2\n")
+case("bom_mid_line", b"a: \xef\xbb\xbf1\n")
+case("utf16le_bom", "a: é\n".encode("utf-16-le").join([b"\xff\xfe", b""]))
+case("utf16be_bom", b"\xfe\xff" + "a: [1, 2]\n".encode("utf-16-be"))
+case("utf16le_odd", b"\xff\xfea\x00:\x00 \x001")
+case("utf16le_lone_surrogate", b"\xff\xfe" + "a: ".encode("utf-16-le") + b"\x00\xd8")
+case("tabs_after_value", "a: 1\t\nb:\t2\n")
+case("tab_indent", "a:\n\tb: 1\n")
+case("unicode_plain", "ключ: значение\n日本: 語\nemoji: 😀\n")
+case("nel_in_plain", "a: x" + chr(0x85) + "y\n")
+case("ls_in_quoted", "a: \"x" + chr(0x2028) + "y\"\n")
+
+# --- structure --------------------------------------------------------------------------------
+case("flow_mixed", "{a: 1, b: [x, y, {c: d}], 'e': \"f\"}\n")
+case("complex_key_str", "? a\n: b\n? c\n")
+case("anchors_aliases", "base: &b {x: 1, y: [1, 2]}\ncopy: *b\nlist: [*b, *b]\n")
+case("merge_single", "a: &x {k: 1, j: 2}\nb:\n  <<: *x\n  k: 3\n")
+case("merge_list_order", "<<: [{a: 1}, {b: 2}, {a: 3, c: 4}]\nc: 5\n")
+case("merge_override_order", "x: 0\n<<: {x: 1, y: 2}\n")
+case("merge_nested", "a: &a {p: 1}\nb: &b {<<: *a, q: 2}\nc: {<<: *b, r: 3}\n")
+case("merge_twice", "a: &a {p: 1}\nb: &b {q: 2}\nc:\n  <<: *a\n  <<: *b\n  p: 0\n")
+case("merge_self", "&a {x: 1, <<: *a}\n")
+case("merge_explicit_tag", "a: {!!merge <<: {b: 1}}\n")
+case("merge_quoted_key", "a: {'<<': {b: 1}}\n")
+case("merge_scalar_error", "<<: 1\n")
+case("merge_list_scalar_error", "<<: [{a: 1}, 2]\n")
+case("merge_value_error", "a: <<\n")
+case("value_key", "=: 1\nb: {=: 2, c: 3}\n")
+case("value_scalar_error", "a: =\n")
+case("str_of_value_mapping", "a: !!str {=: x, y: z}\n")
+case("str_value_recursion", "!!str &a {=: *a}\n")
+case("circular_list", "&a [*a]\n")
+case("circular_dict", "a: &a {b: *a}\n")
+case("circular_nested", "&a [1, [2, *a]]\n")
+case("alias_shared_not_circular", "a: &x [1, 2]\nb: [*x, *x]\n")
+case("unhashable_seq_key", "[a]: 1\n")
+case("unhashable_map_key", "{a: 1}: 2\n")
+case("unhashable_complex_key", "? [a, b]\n: c\n")
+case("unhashable_alias_key", "a: &x [1]\n*x : 2\n")
+case("deep_block", "".join("  " * i + "k:\n" for i in range(300)) + "  " * 300 + "v\n", depth=300)
+case("deep_block_9990", "".join("- " for _ in range(9990)) + "x\n", depth=9990)
+case("deep_block_9989", "".join("- " for _ in range(9989)) + "x\n", depth=9989)
+case("bfs_error_order", "a: [!!int x]\nb: !!int y\n")
+case("bfs_error_order_nested", "a: {b: {c: !!int deep}}\nd: [!!float shallow]\n")
+case("dumps_error_order", "a: !!binary aGk=\nb: &c [*c]\n")
+case("dumps_error_order2", "a: &c [*c]\nb: !!binary aGk=\n")
+case("dumps_dedup_hides_bad_value", "{a: !!binary aGk=, a: 1}\n")
+
+# --- explicit tags ----------------------------------------------------------------------------
+case("tags_core", "a: !!str 12\nb: !!float 12\nc: !!int \"12\"\nd: !!bool yes\ne: !!null x\nf: !!seq [1]\ng: !!map {x: 1}\nh: !!str\n")
+case("tag_int_errors_x", "!!int x\n")
+case("tag_int_empty", "!!int ''\n")
+case("tag_int_sign_only", "!!int '-'\n")
+case("tag_int_spaces", "!!int \" 12 \"\n")
+case("tag_int_prefix_twice", "a: !!int 0x0x1f\nb: !!int 0o17\nc: !!int 0b0b1\nd: !!int -1:-30\n")
+case("tag_int_bad_octal", "!!int 08\n")
+case("tag_int_bad_hex", "!!int 0x\n")
+case("tag_int_long_repr", "!!int " + "a" * 250 + "\n")
+case("tag_int_quote_repr", "!!int \"a'b" + BS + "\"c\"\n")
+case("tag_int_unicode_repr", "!!int \"é" + BS + "t" + chr(0xA0) + "x\"\n")
+case("tag_float_errors", "!!float abc\n")
+case("tag_float_repr_quote", "!!float 'it''s'\n")
+case("tag_float_empty", "!!float ''\n")
+case("tag_float_ok", "a: !!float ' 1.5 '\nb: !!float infinity\nc: !!float -nan\nd: !!float 1:30.5\ne: !!float -.INF\nf: !!float 1e5\n")
+case("tag_float_long", "!!float " + "x" * 250 + "\n")
+case("tag_bool_error", "!!bool maybe\n")
+case("tag_bool_error_upper", "!!bool MAYBE\n")
+case("tag_null_mapping", "!!null {a: 1}\n")
+case("tag_seq_mapping", "!!seq {a: 1}\n")
+case("tag_seq_scalar", "a: !!seq x\n")
+case("tag_map_sequence", "!!map [1]\n")
+case("tag_str_sequence", "!!str [1]\n")
+case("tag_unknown", "!foo bar\n")
+case("tag_unknown_seq", "a: !foo [1]\n")
+case("tag_verbatim", "!<tag:example.com,2000:x> 1\n")
+case("tag_directive", "%TAG !e! tag:example.com,2000:\n---\n!e!x 1\n")
+case("tag_yaml_doc_resolver", "! '*'\n")
+case("tag_value", "a: !!value x\n")
+case("tag_omap", "!!omap [a: 1, b: 2]\n")
+case("tag_pairs", "!!pairs [a: 1, a: 2]\n")
+case("tag_omap_complex_key", "!!omap [{[1]: 2}]\n")
+case("tag_omap_not_seq", "!!omap {a: 1}\n")
+case("tag_omap_scalar_item", "!!omap [a, b]\n")
+case("tag_omap_two_items", "!!omap [{a: 1, b: 2}]\n")
+case("tag_pairs_not_seq", "a: !!pairs x\n")
+case("tag_set", "!!set {a, b}\n")
+case("tag_set_unhashable", "!!set {[a]: 1}\n")
+case("tag_set_key", "{!!set {a}: 1}\n")
+case("tag_binary_value", "a: !!binary aGVsbG8=\n")
+case("tag_binary_key", "{!!binary aGk=: 1}\n")
+case("tag_binary_padding", "!!binary 'aGk'\n")
+case("tag_binary_length", "!!binary 'a'\n")
+case("tag_binary_ignores_junk", "a: !!binary 'a G\nk*='\n")
+case("tag_binary_nonascii", "!!binary 'héllo'\n")
+case("tag_binary_nonascii_run", "!!binary 'ééxé'\n")
+case("tag_timestamp_date", "!!timestamp 2020-01-01\n")
+case("tag_timestamp_datetime", "a: !!timestamp 2001-12-14t21:59:43.10-05:00\n")
+case("tag_timestamp_key", "{!!timestamp 2020-01-01: 1}\n")
+case("tag_timestamp_bad_month", "!!timestamp 2020-13-01\n")
+case("tag_timestamp_bad_day", "!!timestamp 2019-02-29\n")
+case("tag_timestamp_leap_ok", "a: [!!timestamp 2020-02-29]\n")
+case("tag_timestamp_year0", "!!timestamp 0000-01-01\n")
+case("tag_timestamp_nomatch", "!!timestamp nope\n")
+case("tag_timestamp_hour", "!!timestamp 2020-01-01 25:00:00\n")
+case("tag_timestamp_second", "!!timestamp 2020-01-01 10:00:61\n")
+case("tag_timestamp_tz_plus", "!!timestamp 2020-01-01 10:00:00 +25:00\n")
+case("tag_timestamp_tz_minus", "!!timestamp 2020-01-01 10:00:00 -24:30\n")
+case("tag_timestamp_tz_minutes", "!!timestamp 2020-01-01 10:00:00 +23:99\n")
+case("tag_timestamp_tz_vs_date", "!!timestamp 2020-13-01 10:00:00 +25:00\n")
+case("tag_timestamp_mapping", "!!timestamp {=: 2020-01-01}\n")
+
+# --- documents --------------------------------------------------------------------------------
+case("empty", "")
+case("comment_only", "# nothing here\n")
+case("doc_start_only", "---\n")
+case("doc_end_only", "...\n")
+case("doc_explicit", "--- \na: 1\n...\n")
+case("two_docs", "--- 1\n--- 2\n")
+case("two_docs_end", "1\n...\n---\n2\n")
+case("second_doc_broken", "a: 1\n---\nb: [\n")
+case("yaml_directive", "%YAML 1.1\n---\na: 1\n")
+case("yaml_directive_bad", "%YAML 2.0\n---\na: 1\n")
+case("yaml_directive_twice", "%YAML 1.1\n%YAML 1.1\n---\na: 1\n")
+case("unknown_directive", "%FOO bar\n---\na: 1\n")
+
+# --- syntax errors ----------------------------------------------------------------------------
+case("err_flow_seq", "a: [1\nb: 2\n")
+case("err_flow_map", "{a: 1\n")
+case("err_indent", "a:\n  b: 1\n c: 2\n")
+case("err_mapping_values", "a: b: c\n")
+case("err_unclosed_quote", "a: \"abc\n")
+case("err_unclosed_single", "a: 'abc\n")
+case("err_bad_escape", "a: \"" + BS + "q\"\n")
+case("err_bad_hex_escape", "a: \"" + BS + "xZZ\"\n")
+case("err_block_seq_in_map", "a: 1\n- b\n")
+case("err_alias_undefined", "a: *b\n")
+case("err_anchor_duplicate", "a: &a 1\nb: &a 2\n")
+case("err_anchor_redefined_child", "&a [&a 1]\n")
+case("err_tag_empty", "!! 12\n")
+case("err_tag_uri", "!<> x\n")
+case("err_undefined_tag_handle", "!e!x 1\n")
+case("err_long_block_key", "k" * 1100 + ": v\n")
+case("err_tab_start", "\ta: 1\n")
+case("err_at_sign", "a: @x\n")
+case("err_backtick", "a: `x\n")
+case("err_flow_empty_entry", "[a, , b]\n")
+case("err_flow_colon", "{a: b:c, d}\n")
+case("err_plain_colon_flow", "[a:]\n")
+case("err_doc_marker_in_flow", "[a,\n---\n]\n")
+case("err_control_char", "a: 1\x07\n")
+case("err_nul", "a: 1\x00\n")
+case("err_control_late", "a: b\n" + "c: d\n" * 5000 + "e: \x01\n")
+case("err_syntax_then_control", "a: [\n" + "b\n" * 10 + "\x02\n")
+case("err_invalid_utf8_lead", b"a: 1\xff\n")
+case("err_invalid_utf8_trail", b"a: \xc3\x28\n")
+case("err_invalid_utf8_incomplete", b"a: \xe2\x82")
+case("err_invalid_utf8_overlong", b"a: \xc0\xaf\n")
+case("err_invalid_utf8_surrogate", b"a: \xed\xa0\x80\n")
+case("err_invalid_utf8_late", b"a: b\n" + b"c: d\n" * 5000 + b"e: \xff\n")
+case("err_utf16_bom_then_garbage", b"\xfe\xff\x00a\x00:")
+
+# --- stdin (text mode) --------------------------------------------------------------------------
+BOTH = (STRICT, ESCAPE)
+case("text_valid", "a: [1, 2]\nb: é😀\n", BOTH + (FILE,))
+case("text_invalid_early", b"a: 1\xff\n", BOTH)
+case("text_invalid_run", b"a: \xff\xfe\xfd x\n", BOTH)
+case("text_invalid_after_chunk", b"a: b\n" + b"c: d\n" * 5000 + b"e: \xff\n", BOTH)
+case("text_invalid_after_multibyte", b("k: " + "é" * 9000 + "\n") + b"x: \xff\xff\n", BOTH)
+case("text_truncated_at_eof", b"a: \xe2\x82", BOTH)
+case("text_surrogate_bytes", b"a: \xed\xa0\x80\n", BOTH)
+case("text_utf16", b"\xff\xfea\x00:\x00 \x001\x00\n\x00", BOTH)
+case("text_control_after_multibyte", b("a: " + "é" * 20000 + "\n" + "b: [\n" * 3) + b"\x01", BOTH + (FILE,))
+case("text_syntax_error", "a: [1\nb: 2\n", BOTH)
+case("text_deep_9992", "[" * 9992 + "]" * 9992, BOTH + (FILE,), depth=9992)
+case("text_deep_9993", "[" * 9993 + "]" * 9993, BOTH + (FILE,), depth=9993)
+case("text_deep_yaml_9993", "- " * 9993 + "x\n", BOTH + (FILE,), depth=9993)
+case("text_crlf", "a: \"x\r\ny\"\r\nb: 1\r\n", BOTH)
+case("text_json_surrogates", '["' + esc("d83d") + esc("de00") + '"]', BOTH)
+
+
+def main():
+    out = []
+    for name, data, modes, depth in CASES:
+        for mode in modes:
+            if depth is not None:
+                err = run_cli(data, mode)
+                result = {"ok_depth": depth} if err is None else {"err": err}
+            elif mode == FILE:
+                result = load_file(data)
+            elif mode == STRICT:
+                result = load_stdin(data, "strict")
+            else:
+                result = load_stdin(data, "surrogateescape")
+            out.append({"name": name, "mode": mode, "input": data.hex(), **result})
+    names = [n for n, _, _, _ in CASES]
+    assert len(names) == len(set(names)), "duplicate case names"
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "crates", "openapi-spec-validator-rs", "tests", "fixtures", "loader", "corpus.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(out, f, indent=1, ensure_ascii=True)
+        f.write("\n")
+    errors = sum(1 for r in out if "err" in r)
+    print(f"{len(out)} fixtures ({len(CASES)} inputs, {errors} errors) -> {os.path.normpath(path)}")
+
+
+if __name__ == "__main__":
+    main()
