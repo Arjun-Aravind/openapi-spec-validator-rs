@@ -42,6 +42,7 @@ pub enum FormatOutcome {
 /// Equivalent of `checker.check(instance, format)` for one format.
 ///
 /// `regex_is_valid` must implement Python `re.compile` validity (used for `regex`).
+#[cfg(test)]
 pub fn check_format(
     set: FormatSet,
     format: &str,

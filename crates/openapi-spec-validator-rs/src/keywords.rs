@@ -632,6 +632,9 @@ impl<'d, 'a> Walker<'d, 'a> {
             .iter_errors(schema.value)
             .next()
             .map(|error| meta::convert_error(&error, &meta::meta_check_roots()));
+        if let Some(message) = error.as_ref().and_then(meta::crash_message) {
+            return Err(Stop::Crash(message.to_owned()));
+        }
         Ok(error)
     }
 

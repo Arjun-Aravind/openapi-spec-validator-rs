@@ -78,10 +78,11 @@ These behaviours look surprising but are reproduced on purpose:
 | Area | Difference | Impact |
 |---|---|---|
 | Remote references | `http(s)://` `$ref`s are not fetched; they are reported as unresolvable (exit 2). Upstream fetches them. | Specs with remote refs |
+| `\N{NAME}` in patterns | No Unicode name table is bundled: impossible names are rejected exactly, plausible ones are accepted. Matching `default`s against such patterns, or against conditionals inside their own group, is not supported (reported as an error). | Rare |
 | Draft 3 schemas in 3.1+ | A schema declaring `"$schema": "http://json-schema.org/draft-03/schema#"` is reported as an unknown dialect. | None seen in practice |
 | `$id` / `$anchor` | References to `$id`-identified resources or anchors are not resolved by the walker. | Rare in OpenAPI documents |
 | NaN / Infinity, huge integers | YAML `.nan`/`.inf` load as `null`; integers beyond 64 bits load as floats. | Rare |
 | Error order | When a document has several meta-schema errors, the *first* reported error may differ from upstream's (the verdict and error class are the same). | Message of the first error |
 | Error messages | Messages follow upstream's wording; the "Failed validating ..." detail block and best-match subschema hints may differ in places. For errors at the top level of the document, upstream prints its meta-schema as `<Proxy at 0x... wrapping {...}>`, including a memory address, which cannot be reproduced. | Output text only |
 | Set ordering | Upstream prints multiple undefined `required` properties, and unexpected additional properties, in Python set order (which varies between runs). This port uses document order. | Output text only |
-| `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND=jsonschema-rs` | Upstream's optional backend can disagree with its default backend (e.g. format checks on the whole document); this port follows the default backend. | |
+| Upstream with `jsonschema-rs` installed | Upstream switches to its optional `jsonschema-rs` backend automatically when that package is installed. That backend also checks `format` across the whole document, with ECMAScript regex rules, so for example `pattern: "(?P<n>a)"` fails there but passes the default backend. This port follows the default backend. | Specs with `format` violations outside schemas |

@@ -37,6 +37,8 @@ pub mod version;
 
 #[cfg(test)]
 mod pycompat_tests;
+#[cfg(test)]
+mod pyregex_tests;
 
 use std::path::Path;
 

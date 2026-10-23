@@ -280,6 +280,20 @@ pub(crate) fn python_format(
     }
 }
 
+/// Prefix marking a `jsonschema` custom-keyword error that stands for an exception
+/// upstream would raise (custom keywords can only report validation errors).
+const CRASH_MARKER: &str = "\u{0}openapi-spec-validator-rs crash\u{0}";
+
+/// A validation error carrying an upstream exception message.
+pub(crate) fn crash_error(message: &str) -> jsonschema::ValidationError<'static> {
+    jsonschema::ValidationError::custom(format!("{CRASH_MARKER}{message}"))
+}
+
+/// The exception message, if `error` was produced by [`crash_error`].
+pub(crate) fn crash_message(error: &ValidationError) -> Option<&str> {
+    error.message.strip_prefix(CRASH_MARKER)
+}
+
 /// The `format` keyword with openapi-schema-validator's format checker.
 struct PythonFormat {
     format: Option<String>,
@@ -289,7 +303,15 @@ struct PythonFormat {
 impl PythonFormat {
     fn check(&self, instance: &Value) -> FormatOutcome {
         match &self.format {
-            Some(format) => formats::check_format(self.set, format, instance, &pyregex::is_valid),
+            Some(format) => {
+                formats::check_format_with_cause(
+                    self.set,
+                    format,
+                    instance,
+                    &pyregex::check_regex_format,
+                )
+                .0
+            }
             None => FormatOutcome::Unknown,
         }
     }
@@ -299,9 +321,8 @@ impl<'i> Keyword<'i> for PythonFormat {
     fn validate(&self, instance: &'i Value) -> Result<(), jsonschema::ValidationError<'i>> {
         match self.check(instance) {
             FormatOutcome::Unknown | FormatOutcome::Valid => Ok(()),
-            FormatOutcome::Invalid(message) | FormatOutcome::Crash(message) => {
-                Err(jsonschema::ValidationError::custom(message))
-            }
+            FormatOutcome::Invalid(message) => Err(jsonschema::ValidationError::custom(message)),
+            FormatOutcome::Crash(message) => Err(crash_error(&message)),
         }
     }
 

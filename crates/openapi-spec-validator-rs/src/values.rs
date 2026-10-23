@@ -117,10 +117,14 @@ impl<'d, 'a> DefaultValidator<'d, 'a> {
             .filter_map(|doc| document_value(docs, doc))
             .collect();
         roots.push(&reference);
-        Ok(validator
+        let errors: Vec<ValidationError> = validator
             .iter_errors(value)
             .map(|error| meta::convert_error(&error, &roots))
-            .collect())
+            .collect();
+        if let Some(message) = errors.iter().find_map(meta::crash_message) {
+            return Err(Crash(message.to_owned()));
+        }
+        Ok(errors)
     }
 }
 
@@ -205,10 +209,10 @@ const FRAGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
     .add(b'[')
     .add(b']');
 
-/// `pattern` with Python `re.search` semantics.
+/// `pattern` with Python `re.search` semantics; a pattern `re` rejects raises upstream.
 struct PyPattern {
     pattern: String,
-    regex: Option<PyRegex>,
+    regex: Result<PyRegex, String>,
 }
 
 fn py_pattern<'a>(
@@ -217,30 +221,32 @@ fn py_pattern<'a>(
     _: Location,
 ) -> Result<Box<dyn for<'i> Keyword<'i>>, jsonschema::ValidationError<'a>> {
     let pattern = value.as_str().unwrap_or_default().to_owned();
-    let regex = PyRegex::compile(&pattern).ok();
+    let regex = PyRegex::compile(&pattern).map_err(|error| error.python_str(&pattern));
     Ok(Box::new(PyPattern { pattern, regex }))
 }
 
 impl<'i> Keyword<'i> for PyPattern {
     fn validate(&self, instance: &'i Value) -> Result<(), jsonschema::ValidationError<'i>> {
-        if self.is_valid(instance) {
-            Ok(())
-        } else {
-            Err(jsonschema::ValidationError::custom(format!(
+        let Value::String(text) = instance else {
+            return Ok(());
+        };
+        let regex = self
+            .regex
+            .as_ref()
+            .map_err(|message| meta::crash_error(message))?;
+        match regex.search(text) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(jsonschema::ValidationError::custom(format!(
                 "{} does not match {}",
                 repr(instance),
                 repr_str(&self.pattern)
-            )))
+            ))),
+            Err(message) => Err(meta::crash_error(&message)),
         }
     }
 
     fn is_valid(&self, instance: &'i Value) -> bool {
-        let Value::String(text) = instance else {
-            return true;
-        };
-        self.regex
-            .as_ref()
-            .is_some_and(|regex| regex.search(text).unwrap_or(false))
+        self.validate(instance).is_ok()
     }
 }
 
@@ -762,10 +768,19 @@ impl<'d> Oas30<'d, '_, '_> {
                 let Value::String(format) = value else {
                     return Ok(());
                 };
-                match formats::check_format(FormatSet::Oas30, format, instance, &pyregex::is_valid)
-                {
+                let (outcome, cause) = formats::check_format_with_cause(
+                    FormatSet::Oas30,
+                    format,
+                    instance,
+                    &pyregex::check_regex_format,
+                );
+                match outcome {
                     FormatOutcome::Unknown | FormatOutcome::Valid => {}
-                    FormatOutcome::Invalid(message) => errors.push(Self::error(message)),
+                    FormatOutcome::Invalid(message) => {
+                        let mut error = Self::error(message);
+                        error.cause = cause;
+                        errors.push(error);
+                    }
                     FormatOutcome::Crash(message) => return Err(Crash(message)),
                 }
             }
@@ -841,7 +856,7 @@ impl<'d> Oas30<'d, '_, '_> {
         let regex = if patterns.is_empty() {
             None
         } else {
-            Some(PyRegex::compile(&patterns).map_err(|e| Crash(e.msg))?)
+            Some(PyRegex::compile(&patterns).map_err(|e| Crash(e.python_str(&patterns)))?)
         };
         let mut extras = Vec::new();
         for key in object.keys() {
