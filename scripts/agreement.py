@@ -133,6 +133,7 @@ def main():
 
     verdict_agree = line_agree = 0
     mismatches = collections.defaultdict(list)
+    line_mismatches = []
     by_verdict = collections.Counter()
     ref_seconds = cand_seconds = 0.0
     for path in files:
@@ -143,7 +144,10 @@ def main():
         by_verdict[ref["verdict"]] += 1
         if ref["verdict"] == cand["verdict"]:
             verdict_agree += 1
-            line_agree += ref["first"] == cand["first"]
+            if ref["first"] == cand["first"]:
+                line_agree += 1
+            else:
+                line_mismatches.append((path, ref["first"], cand["first"]))
         else:
             mismatches[(ref["verdict"], cand["verdict"])].append((path, ref["first"], cand["first"]))
 
@@ -176,6 +180,16 @@ def main():
             lines.append(f"  * reference: `{ref_first[:300]}`")
             lines.append(f"  * candidate: `{cand_first[:300]}`")
         lines.append("")
+    lines += [
+        "## Same verdict, different first line",
+        "",
+        f"{len(line_mismatches)} specs. Messages differ only in wording or in which of several errors is reported first.",
+        "",
+    ]
+    for path, ref_first, cand_first in line_mismatches:
+        lines.append(f"* `{path}`")
+        lines.append(f"  * reference: `{ref_first[:300]}`")
+        lines.append(f"  * candidate: `{cand_first[:300]}`")
     report = "\n".join(lines)
     if args.report:
         os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)

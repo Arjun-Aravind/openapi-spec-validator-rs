@@ -25,8 +25,16 @@ fn bundled(json: &str) -> Value {
     serde_json::from_str(json).expect("bundled meta-schemas are valid JSON")
 }
 
-static SCHEMA_V20: LazyLock<Value> =
-    LazyLock::new(|| bundled(include_str!("../resources/schemas/v2.0/schema.json")));
+// The Swagger 2.0 meta-schema reuses Draft 4 definitions; point them at Python's copy.
+static SCHEMA_V20: LazyLock<Value> = LazyLock::new(|| {
+    let mut schema = bundled(include_str!("../resources/schemas/v2.0/schema.json"));
+    redirect_refs(
+        &mut schema,
+        "http://json-schema.org/draft-04/schema#",
+        DRAFT4_URN,
+    );
+    schema
+});
 static SCHEMA_V30: LazyLock<Value> =
     LazyLock::new(|| bundled(include_str!("../resources/schemas/v3.0/schema.json")));
 static SCHEMA_V31: LazyLock<Value> =
@@ -59,9 +67,51 @@ pub(crate) const OAS32_DIALECT_ID: &str = "https://spec.openapis.org/oas/3.2/dia
 const OAS31_VOCAB_URI: &str = "https://spec.openapis.org/oas/3.1/vocab/base";
 const OAS32_VOCAB_URI: &str = "https://spec.openapis.org/oas/3.2/vocab/base";
 
+/// Private URIs for the Draft 4 and Draft 7 meta-schemas exactly as Python's
+/// `jsonschema-specifications` ships them. The copies built into the `jsonschema` crate
+/// differ (Draft 4's `enum` lacks `minItems`/`uniqueItems`, Draft 7 adds `writeOnly`) and
+/// cannot be overridden under their official URIs.
+const DRAFT4_URN: &str = "urn:openapi-spec-validator-rs:draft-04";
+const DRAFT7_URN: &str = "urn:openapi-spec-validator-rs:draft-07";
+
+static PY_DRAFT4: LazyLock<Value> = LazyLock::new(|| {
+    let mut schema = bundled(include_str!("../resources/metaschemas/draft-04.json"));
+    schema["id"] = Value::String(format!("{DRAFT4_URN}#"));
+    schema
+});
+static PY_DRAFT7: LazyLock<Value> = LazyLock::new(|| {
+    let mut schema = bundled(include_str!("../resources/metaschemas/draft-07.json"));
+    schema["$id"] = Value::String(DRAFT7_URN.to_owned());
+    schema
+});
+
+/// Rewrites `$ref`s that start with `from` to start with `to` instead.
+fn redirect_refs(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get_mut("$ref") {
+                if let Some(rest) = reference.strip_prefix(from) {
+                    *reference = format!("{to}#{rest}");
+                }
+            }
+            for child in map.values_mut() {
+                redirect_refs(child, from, to);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                redirect_refs(child, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
 static OAS_REGISTRY: LazyLock<Registry<'static>> = LazyLock::new(|| {
     Registry::new()
-        .add(OAS31_DIALECT_ID, &*OAS31_DIALECT)
+        .add(DRAFT4_URN, &*PY_DRAFT4)
+        .and_then(|r| r.add(DRAFT7_URN, &*PY_DRAFT7))
+        .and_then(|r| r.add(OAS31_DIALECT_ID, &*OAS31_DIALECT))
         .and_then(|r| r.add("https://spec.openapis.org/oas/3.1/meta/base", &*OAS31_VOCAB))
         .and_then(|r| r.add(OAS32_DIALECT_ID, &*OAS32_DIALECT))
         .and_then(|r| {
@@ -92,7 +142,9 @@ pub(crate) fn document_validator(version: SpecVersion) -> &'static Validator {
         .position(|v| *v == version)
         .unwrap_or_default();
     VALIDATORS[index].get_or_init(|| {
-        let mut options = jsonschema::options().should_validate_formats(false);
+        let mut options = jsonschema::options()
+            .with_registry(&OAS_REGISTRY)
+            .should_validate_formats(false);
         if matches!(version, SpecVersion::V2_0 | SpecVersion::V3_0) {
             options = options.with_keyword("type", draft4_type);
         }
@@ -146,9 +198,9 @@ impl Dialect {
 
     fn meta_schema_uri(self) -> &'static str {
         match self {
-            Self::Draft4 => "http://json-schema.org/draft-04/schema#",
+            Self::Draft4 => DRAFT4_URN,
             Self::Draft6 => "http://json-schema.org/draft-06/schema#",
-            Self::Draft7 => "http://json-schema.org/draft-07/schema#",
+            Self::Draft7 => DRAFT7_URN,
             Self::Draft201909 => "https://json-schema.org/draft/2019-09/schema",
             Self::Draft202012 => "https://json-schema.org/draft/2020-12/schema",
             Self::Oas31 => OAS31_DIALECT_ID,
@@ -447,24 +499,49 @@ fn strip_prefix<'p>(path: &'p [PathItem], prefix: &[PathItem]) -> &'p [PathItem]
     path.strip_prefix(prefix).unwrap_or(path)
 }
 
-/// Schema resources a meta-check error can point into.
-pub(crate) fn meta_check_roots() -> [&'static Value; 13] {
+/// Schema resources a whole-document error can point into.
+pub(crate) fn document_roots(version: SpecVersion) -> [&'static Value; 2] {
+    [document_schema(version), &PY_DRAFT4]
+}
+
+/// Schema resources an error from `dialect`'s meta-check can point into.
+pub(crate) fn meta_check_roots(dialect: Dialect) -> Vec<&'static Value> {
     use referencing::meta;
-    [
-        &**meta::DRAFT4,
-        &**meta::DRAFT6,
-        &**meta::DRAFT7,
-        &**meta::DRAFT202012,
-        &**meta::DRAFT202012_CORE,
-        &**meta::DRAFT202012_APPLICATOR,
-        &**meta::DRAFT202012_UNEVALUATED,
-        &**meta::DRAFT202012_VALIDATION,
-        &**meta::DRAFT202012_META_DATA,
-        &**meta::DRAFT202012_FORMAT_ANNOTATION,
-        &**meta::DRAFT202012_CONTENT,
-        &*OAS31_VOCAB,
-        &*OAS32_VOCAB,
-    ]
+    let draft202012 = || {
+        [
+            &**meta::DRAFT202012,
+            &**meta::DRAFT202012_CORE,
+            &**meta::DRAFT202012_APPLICATOR,
+            &**meta::DRAFT202012_UNEVALUATED,
+            &**meta::DRAFT202012_VALIDATION,
+            &**meta::DRAFT202012_META_DATA,
+            &**meta::DRAFT202012_FORMAT_ANNOTATION,
+            &**meta::DRAFT202012_CONTENT,
+        ]
+    };
+    match dialect {
+        Dialect::Draft4 => vec![&*PY_DRAFT4],
+        Dialect::Draft6 => vec![&**meta::DRAFT6],
+        Dialect::Draft7 => vec![&*PY_DRAFT7],
+        Dialect::Draft201909 => vec![
+            &**meta::DRAFT201909,
+            &**meta::DRAFT201909_CORE,
+            &**meta::DRAFT201909_APPLICATOR,
+            &**meta::DRAFT201909_VALIDATION,
+            &**meta::DRAFT201909_META_DATA,
+            &**meta::DRAFT201909_FORMAT,
+            &**meta::DRAFT201909_CONTENT,
+        ],
+        Dialect::Draft202012 => draft202012().to_vec(),
+        Dialect::Oas31 => [&*OAS31_DIALECT, &*OAS31_VOCAB]
+            .into_iter()
+            .chain(draft202012())
+            .collect(),
+        Dialect::Oas32 => [&*OAS32_DIALECT, &*OAS32_VOCAB]
+            .into_iter()
+            .chain(draft202012())
+            .collect(),
+    }
 }
 
 fn path_items(location: &Location) -> Vec<PathItem> {

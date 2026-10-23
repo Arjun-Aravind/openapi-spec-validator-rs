@@ -172,7 +172,8 @@ impl<'a> Documents<'a> {
         let (target_doc, fragment) = if let Some(fragment) = reference.strip_prefix('#') {
             (doc, fragment.to_owned())
         } else {
-            let unresolvable = || Crash(format!("Unresolvable: {reference}"));
+            // `str(Unresolvable(ref))` is the reference itself.
+            let unresolvable = || Crash(reference.to_owned());
             let joined = join_uri(self.uri(doc), reference).ok_or_else(unresolvable)?;
             let (uri, fragment) = joined.split_once('#').unwrap_or((&joined, ""));
             let target = *self.by_uri.get(uri).ok_or_else(unresolvable)?;
@@ -188,6 +189,13 @@ impl<'a> Documents<'a> {
         if !fragment.starts_with('/') {
             // Anchors (`#foo`) are only found via `$id`/`$anchor` resources, which
             // upstream's registry would have to crawl; none exist in a plain spec.
+            if fragment.contains('/') {
+                return Err(Crash(format!(
+                    "'#{fragment}' is not a valid anchor, neither as a plain name anchor nor as \
+                     a JSON Pointer. You may have intended to use '#/{fragment}', as the slash \
+                     is required *before each segment* of a JSON pointer."
+                )));
+            }
             return Err(Crash(format!(
                 "{} does not exist within {}",
                 pyrepr::repr_str(&fragment),
@@ -381,7 +389,7 @@ fn join_uri(base: &str, reference: &str) -> Option<String> {
 
 /// Retrieves an external document the way upstream's default handlers would.
 fn retrieve(uri: &str, reference: &str) -> Result<Value, String> {
-    let unresolvable = || format!("Unresolvable: {reference}");
+    let unresolvable = || reference.to_owned();
     let url = Url::parse(uri).map_err(|_| unresolvable())?;
     if url.scheme() != "file" {
         // Upstream fetches http(s) references over the network; this port does not.

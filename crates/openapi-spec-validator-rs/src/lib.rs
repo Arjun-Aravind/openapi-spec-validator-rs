@@ -87,9 +87,12 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let mut errors = Vec::new();
     let validator = meta::document_validator(version);
     if !validator.is_valid(spec) {
-        let schema = meta::document_schema(version);
         for error in validator.iter_errors(spec) {
-            errors.push(meta::convert_error(&error, &[schema], spec));
+            errors.push(meta::convert_error(
+                &error,
+                &meta::document_roots(version),
+                spec,
+            ));
             if first_only {
                 return Outcome::Invalid(errors);
             }

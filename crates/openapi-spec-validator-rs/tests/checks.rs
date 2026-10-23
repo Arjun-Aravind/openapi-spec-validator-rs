@@ -65,6 +65,27 @@ fn document_meta_schema() {
 }
 
 #[test]
+fn draft4_meta_schema_is_pythons_copy() {
+    // The Draft 4 meta-schema built into the jsonschema crate drops `uniqueItems` on `enum`.
+    assert_errors(
+        "enum_duplicates",
+        &[(
+            OpenApiValidation,
+            "['true', 'true'] has non-unique elements",
+        )],
+    );
+    // Swagger 2.0's meta-schema reuses Draft 4's `enum` definition.
+    assert_errors(
+        "v2_enum_duplicates",
+        &[(
+            OpenApiValidation,
+            "{'name': 'q', 'in': 'query', 'type': 'string', 'enum': ['a', 'a']} is not valid \
+             under any of the given schemas",
+        )],
+    );
+}
+
+#[test]
 fn schema_meta_check() {
     assert_errors(
         "schema_invalid_python_regex",
@@ -238,4 +259,13 @@ fn upstream_exceptions() {
         "expected string or bytes-like object, got 'float'",
     );
     assert_eq!(run("version_unknown"), Outcome::Error(String::new()));
+    assert_crash(
+        "ref_anchor_missing_slash",
+        "'#components/schemas/X' is not a valid anchor, neither as a plain name anchor nor as a \
+         JSON Pointer. You may have intended to use '#/components/schemas/X'",
+    );
+    assert_eq!(
+        run("ref_missing_file"),
+        Outcome::Error("./missing.json#/X".to_owned())
+    );
 }
