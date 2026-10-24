@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.1] - 2026-10-25
 
 ### Fixed
 
@@ -94,6 +94,6 @@ First release: a Rust port of [openapi-spec-validator](https://github.com/python
   specs of the APIs.guru directory; see [COMPATIBILITY.md](COMPATIBILITY.md) for the
   remaining, documented differences.
 
-[Unreleased]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/compare/v0.2.0...HEAD
+[0.2.1]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/releases/tag/v0.1.0
