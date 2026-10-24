@@ -7,6 +7,7 @@ classes, messages, ``validator``, instance and schema paths, ``context`` and ``s
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -66,8 +67,21 @@ def outcome(run: Callable[..., list[Any]], mod: Any, spec: Any, base_uri: str) -
         name = type(error).__name__
         if mod is upstream and name not in DETECTION_ERRORS:
             name = "ValidationAbortedError"
-        return ("raises", name, str(error))
+        return ("raises", name, modern_wording(str(error)))
     return ("errors", [describe(error) for error in errors])
+
+
+def modern_wording(message: str) -> str:
+    """Python's own exception messages as CPython 3.12+ words them, which is what this
+    package reproduces; older interpreters word upstream's differently (see
+    COMPATIBILITY.md)."""
+    if sys.version_info < (3, 12) and message.startswith("maximum recursion depth exceeded"):
+        return "maximum recursion depth exceeded"
+    if sys.version_info < (3, 11) and message.startswith(
+        "expected string or bytes-like object"
+    ):
+        return "expected string or bytes-like object"
+    return message
 
 
 def describe(error: Any) -> tuple[Any, ...]:
