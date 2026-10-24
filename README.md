@@ -5,7 +5,8 @@
 It validates Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2 documents with the same rules as
 openapi-spec-validator, returns the same verdicts, and runs 40 to 145 times faster on large
 specs. It ships as a command-line tool, a Python package with the same API, and a pre-commit
-hook.
+hook. It is an independent project, not affiliated with or endorsed by the maintainers of
+openapi-spec-validator.
 
 Command-line run time, including start-up and parsing, on an Apple M4
 (mean of 10 runs; the range is openapi-spec-validator with its jsonschema-rs backend and with
