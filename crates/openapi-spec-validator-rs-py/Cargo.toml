@@ -20,3 +20,9 @@ openapi-spec-validator-rs.workspace = true
 openapi-spec-validator-rs-cli.workspace = true
 pyo3.workspace = true
 serde_json.workspace = true
+
+# musl's dynamic loader cannot relocate initial-exec thread-local storage in a
+# library loaded with dlopen, which is how Python loads this extension; mimalloc
+# must use the local-dynamic model there (its default elsewhere stays faster).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
