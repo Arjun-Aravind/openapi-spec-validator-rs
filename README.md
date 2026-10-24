@@ -3,7 +3,7 @@
 **A fast, drop-in Rust companion to [openapi-spec-validator](https://github.com/python-openapi/openapi-spec-validator).**
 
 It validates Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2 documents with the same rules as
-openapi-spec-validator, returns the same verdicts, and runs 40 to 145 times faster on large
+openapi-spec-validator, returns the same verdicts, and runs 37 to 143 times faster on large
 specs. It ships as a command-line tool, a Python package with the same API, and a pre-commit
 hook. It is an independent project, not affiliated with or endorsed by the maintainers of
 openapi-spec-validator.
@@ -14,10 +14,10 @@ with its default backend):
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator | Speed-up |
 |---|---:|---:|---:|
-| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | **57 ms** | 6.41 s – 8.18 s | **113–144×** |
-| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **152 ms** | 6.45 s – 8.20 s | **42–54×** |
-| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **31 ms** | 1.80 s – 2.82 s | **59–92×** |
-| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **20 ms** | 762 ms – 2.13 s | **39–109×** |
+| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | **57 ms** | 6.45 s – 8.21 s | **112–143×** |
+| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **150 ms** | 6.46 s – 8.23 s | **43–55×** |
+| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **31 ms** | 1.81 s – 2.85 s | **59–93×** |
+| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **20 ms** | 766 ms – 2.14 s | **37–104×** |
 
 The `pip`-installed command runs the same validator behind a Python entry point, which adds
 about 25 ms of interpreter start-up per run: 45 ms for Kubernetes and 80 ms for GitHub's
@@ -159,12 +159,13 @@ validates FastAPI's `app.openapi()` does), median of 5 runs:
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend |
 |---|---:|---:|---:|
-| GitHub (13.5 MB) | **33 ms** | 4.67 s (143× slower) | 6.38 s (196× slower) |
-| Stripe (8.3 MB) | **16 ms** | 0.89 s (55× slower) | 1.91 s (119× slower) |
-| Kubernetes (4.3 MB) | **11 ms** | 0.33 s (29× slower) | 1.70 s (149× slower) |
+| GitHub (13.5 MB) | **30 ms** | 4.66 s (158× slower) | 6.40 s (217× slower) |
+| Stripe (8.3 MB) | **15 ms** | 0.89 s (58× slower) | 1.92 s (126× slower) |
+| Kubernetes (4.3 MB) | **11 ms** | 0.33 s (30× slower) | 1.70 s (154× slower) |
 
-It also needs about a quarter of the memory on JSON specs: 81 MiB instead of 290 MiB for
-GitHub's (98 MiB through the `pip`-installed command).
+On the same machine it also needs about a quarter of the memory on JSON specs: 84 MiB
+instead of 289 MiB for GitHub's (98 MiB through the `pip`-installed command); the ratio
+varies with the platform's allocator and Python build.
 
 Validating every spec in the APIs.guru directory that openapi-spec-validator accepts (3,646
 files, 535 MB of YAML) takes 1.6 s instead of 202–332 s.

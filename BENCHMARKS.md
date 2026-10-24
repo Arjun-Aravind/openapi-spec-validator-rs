@@ -12,19 +12,19 @@ measured below):
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend | vacuum (validation rules) |
 |---|---:|---:|---:|---:|
-| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | **57 ms ± 1** | 6.41 s ± 0.02 (113× slower) | 8.18 s ± 0.03 (144× slower) | 1.10 s ± 0.02 (19× slower) |
-| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **152 ms ± 3** | 6.45 s ± 0.02 (42× slower) | 8.20 s ± 0.02 (54× slower) | 1.28 s ± 0.01 (8× slower) |
-| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **31 ms ± 0** | 1.80 s ± 0.01 (59× slower) | 2.82 s ± 0.01 (92× slower) | 692 ms ± 9 (23× slower) |
-| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **20 ms ± 0** | 762 ms ± 4 (39× slower) | 2.13 s ± 0.01 (109× slower) | 247 ms ± 4 (13× slower) |
+| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | **57 ms ± 1** | 6.45 s ± 0.03 (112× slower) | 8.21 s ± 0.02 (143× slower) | 1.09 s ± 0.01 (19× slower) |
+| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **150 ms ± 0** | 6.46 s ± 0.01 (43× slower) | 8.23 s ± 0.03 (55× slower) | 1.29 s ± 0.03 (9× slower) |
+| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **31 ms ± 0** | 1.81 s ± 0.02 (59× slower) | 2.85 s ± 0.02 (93× slower) | 689 ms ± 7 (22× slower) |
+| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **20 ms ± 0** | 766 ms ± 4 (37× slower) | 2.14 s ± 0.01 (104× slower) | 245 ms ± 2 (12× slower) |
 
 Peak memory (resident set):
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend | vacuum (validation rules) |
 |---|---:|---:|---:|---:|
-| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | 81 MiB | 291 MiB | 289 MiB | 1399 MiB |
-| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | 132 MiB | 292 MiB | 289 MiB | 1434 MiB |
-| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | 49 MiB | 184 MiB | 181 MiB | 857 MiB |
-| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | 31 MiB | 122 MiB | 120 MiB | 325 MiB |
+| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | 84 MiB | 291 MiB | 289 MiB | 1405 MiB |
+| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | 137 MiB | 292 MiB | 289 MiB | 1473 MiB |
+| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | 53 MiB | 184 MiB | 181 MiB | 854 MiB |
+| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | 34 MiB | 122 MiB | 120 MiB | 319 MiB |
 
 ### The pip-installed command
 
@@ -48,9 +48,9 @@ validating FastAPI's `app.openapi()` in a test:
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend |
 |---|---:|---:|---:|
-| GitHub (13.5 MB) | **33 ms** | 4.67 s (143× slower) | 6.38 s (196× slower) |
-| Stripe (8.3 MB) | **16 ms** | 0.89 s (55× slower) | 1.91 s (119× slower) |
-| Kubernetes (4.3 MB) | **11 ms** | 0.33 s (29× slower) | 1.70 s (149× slower) |
+| GitHub (13.5 MB) | **30 ms** | 4.66 s (158× slower) | 6.40 s (217× slower) |
+| Stripe (8.3 MB) | **15 ms** | 0.89 s (58× slower) | 1.92 s (126× slower) |
+| Kubernetes (4.3 MB) | **11 ms** | 0.33 s (30× slower) | 1.70 s (154× slower) |
 
 ## Whole corpus
 
@@ -85,7 +85,7 @@ start-up and parsing, exactly as a user or CI job experiences them.
 
 | Tool | Command |
 |---|---|
-| openapi-spec-validator-rs 0.1.0 | `openapi-spec-validator-rs FILE` (the native binary, `target/release/openapi-spec-validator-rs`) |
+| openapi-spec-validator-rs 0.2.0 | `openapi-spec-validator-rs FILE` (the native binary, a release build of the `v0.2.0` tag) |
 | openapi-spec-validator 0.9.0, default backend | `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND=jsonschema openapi-spec-validator FILE` |
 | openapi-spec-validator 0.9.0, jsonschema-rs backend | `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND=jsonschema-rs openapi-spec-validator FILE` (jsonschema-rs 0.60.1) |
 | vacuum 0.35.1 | `vacuum lint -q -x -r bench/vacuum-validate.yaml FILE` |
