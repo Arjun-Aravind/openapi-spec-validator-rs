@@ -53,7 +53,7 @@ pip install openapi-spec-validator-rs
 ```
 
 This installs the `openapi-spec-validator-rs` command and the `openapi_spec_validator_rs`
-Python package (wheels for Linux, macOS and Windows; Python 3.10+). The command is also
+Python package (wheels for Linux, glibc and musl, macOS and Windows; Python 3.10+). The command is also
 available on its own, without Python, as a Rust binary:
 
 ```bash
