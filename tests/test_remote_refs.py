@@ -65,7 +65,13 @@ class Server:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Quiet(http.server.ThreadingHTTPServer):
+            # A client's TLS handshake makes the handler of this plain server raise;
+            # the traceback must not reach stderr while a tool's output is captured.
+            def handle_error(self, request: Any, client_address: Any) -> None:
+                pass
+
+        self._server = Quiet(("127.0.0.1", 0), Handler)
         self.base = f"http://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
