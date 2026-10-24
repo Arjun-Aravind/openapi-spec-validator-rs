@@ -123,6 +123,9 @@ pub(crate) struct Documents<'a> {
     externals: Arena<External>,
     /// Document index by URI (without fragment): 0 is the root, `n` is `externals[n - 1]`.
     by_uri: RefCell<HashMap<String, usize>>,
+    /// The one-character strings that pointers into strings resolve to: Python indexes
+    /// a `str` like a sequence and yields a new `str` each time.
+    characters: Arena<Value>,
 }
 
 impl<'a> Documents<'a> {
@@ -138,6 +141,7 @@ impl<'a> Documents<'a> {
             retriever,
             externals: Arena::new(),
             by_uri: RefCell::new(by_uri),
+            characters: Arena::new(),
         }
     }
 
@@ -296,8 +300,72 @@ impl<'a> Documents<'a> {
                 ),
             ));
         }
-        let value = pointer(contents, fragment)?;
+        let value = self.pointer(contents, fragment)?;
         Ok(Node { value, doc })
+    }
+
+    /// `Resource.pointer` from `referencing`: each segment indexes a mapping by key or a
+    /// sequence by position. A Python `str` is a sequence too, so a pointer can reach
+    /// into a string and come out with one of its characters.
+    fn pointer<'d>(&'d self, document: &'d Value, pointer: &str) -> Result<&'d Value, LookupError> {
+        let nowhere = || {
+            let mut message = format!(
+                "{} does not exist within {}",
+                pyrepr::repr_str(pointer),
+                pyrepr::repr(document)
+            );
+            if pointer == "/" {
+                message.push_str(
+                    ". The pointer '/' is a valid JSON Pointer but it points to an empty string \
+                     property ''. If you intended to point to the entire resource, you should use '#'.",
+                );
+            }
+            LookupError::referencing("PointerToNowhere", message)
+        };
+        let invalid_index = |segment: &str| {
+            LookupError::from(Crash(format!(
+                "invalid literal for int() with base 10: {}",
+                pyrepr::repr_str(segment)
+            )))
+        };
+        // `int(segment)`, then Python's negative indexing.
+        let position = |segment: &str, len: usize| -> Result<Option<usize>, LookupError> {
+            let index = python_int(segment).ok_or_else(|| invalid_index(segment))?;
+            let index = if index < 0 {
+                i128::try_from(len).unwrap_or(i128::MAX) + index
+            } else {
+                index
+            };
+            Ok(usize::try_from(index).ok().filter(|&i| i < len))
+        };
+        let decoded = percent_decode_str(&pointer[1..]).decode_utf8_lossy();
+        let mut contents = document;
+        for segment in decoded.split('/') {
+            contents = match contents {
+                Value::Array(items) => position(segment, items.len())?
+                    .map(|i| &items[i])
+                    .ok_or_else(nowhere)?,
+                Value::Object(map) => {
+                    let key = segment.replace("~1", "/").replace("~0", "~");
+                    map.get(&key).ok_or_else(nowhere)?
+                }
+                Value::String(text) => {
+                    let character = position(segment, text.chars().count())?
+                        .and_then(|i| text.chars().nth(i))
+                        .ok_or_else(nowhere)?;
+                    let index = self.characters.push(Value::String(character.to_string()));
+                    self.characters.get(index)
+                }
+                other => {
+                    return Err(Crash(format!(
+                        "'{}' object is not subscriptable",
+                        python_type_name(other)
+                    ))
+                    .into());
+                }
+            };
+        }
+        Ok(contents)
     }
 
     /// The child `key` of a mapping node, resolved (`path / key`).
@@ -366,62 +434,6 @@ pub(crate) enum Key<'d> {
 /// `is_ref` from `jsonschema-path`: a mapping whose `$ref` is a string.
 pub(crate) fn as_ref(value: &Value) -> Option<&str> {
     value.as_object()?.get("$ref")?.as_str()
-}
-
-/// `Resource.pointer` from `referencing`.
-fn pointer<'d>(document: &'d Value, pointer: &str) -> Result<&'d Value, LookupError> {
-    let nowhere = || {
-        let mut message = format!(
-            "{} does not exist within {}",
-            pyrepr::repr_str(pointer),
-            pyrepr::repr(document)
-        );
-        if pointer == "/" {
-            message.push_str(
-                ". The pointer '/' is a valid JSON Pointer but it points to an empty string \
-                 property ''. If you intended to point to the entire resource, you should use '#'.",
-            );
-        }
-        LookupError::referencing("PointerToNowhere", message)
-    };
-    let decoded = percent_decode_str(&pointer[1..]).decode_utf8_lossy();
-    let mut contents = document;
-    for segment in decoded.split('/') {
-        contents = match contents {
-            Value::Array(items) => {
-                let index = python_int(segment).ok_or_else(|| {
-                    Crash(format!(
-                        "invalid literal for int() with base 10: {}",
-                        pyrepr::repr_str(segment)
-                    ))
-                })?;
-                let index = if index < 0 {
-                    i128::try_from(items.len()).unwrap_or(i128::MAX) + index
-                } else {
-                    index
-                };
-                usize::try_from(index)
-                    .ok()
-                    .and_then(|i| items.get(i))
-                    .ok_or_else(nowhere)?
-            }
-            Value::Object(map) => {
-                let key = segment.replace("~1", "/").replace("~0", "~");
-                map.get(&key).ok_or_else(nowhere)?
-            }
-            // Strings are sequences in Python, so indexing them yields a new
-            // one-character string that has no address in the document.
-            Value::String(_) => return Err(nowhere()),
-            other => {
-                return Err(Crash(format!(
-                    "'{}' object is not subscriptable",
-                    python_type_name(other)
-                ))
-                .into());
-            }
-        };
-    }
-    Ok(contents)
 }
 
 /// Python `int(s)` for base-10 literals (ASCII digits, sign, underscores, whitespace).
@@ -524,6 +536,35 @@ mod tests {
             message,
             "'/nope' does not exist within {'a': {'$ref': '#/nope'}}"
         );
+    }
+
+    #[test]
+    fn pointers_index_strings_like_python() {
+        let spec = json!({
+            "info": {"title": "tx"},
+            "a": {"$ref": "#/info/title/0"},
+            "b": {"$ref": "#/info/title/-1"},
+            "c": {"$ref": "#/info/title/x"},
+            "d": {"$ref": "#/info/title/2"},
+            "e": {"$ref": "#/info/title/1/0/0"},
+        });
+        let docs = Documents::new(&spec, "", None);
+        assert_eq!(docs.child(docs.root(), "a").unwrap().value, &json!("t"));
+        assert_eq!(docs.child(docs.root(), "b").unwrap().value, &json!("x"));
+        assert_eq!(docs.child(docs.root(), "e").unwrap().value, &json!("x"));
+        assert_eq!(
+            docs.child(docs.root(), "c").unwrap_err(),
+            Crash("invalid literal for int() with base 10: 'x'".to_owned())
+        );
+        assert!(
+            docs.child(docs.root(), "d")
+                .unwrap_err()
+                .0
+                .starts_with("'/info/title/2' does not exist within")
+        );
+        // Each resolution yields a new string, as in Python.
+        let first = docs.child(docs.root(), "a").unwrap().id();
+        assert_ne!(first, docs.child(docs.root(), "a").unwrap().id());
     }
 
     #[test]

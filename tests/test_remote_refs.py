@@ -82,7 +82,12 @@ class Server:
 
 
 @pytest.fixture
-def server() -> Iterator[Server]:
+def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
+    # A proxy configured in the environment must not capture requests to the test
+    # server (upstream, run by the differential tests, reads the same variables).
+    for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
     server = Server()
     yield server
     server.close()

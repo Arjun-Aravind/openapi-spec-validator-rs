@@ -97,6 +97,7 @@ mod http {
     #[derive(Clone)]
     pub struct HttpRetriever {
         timeout: Duration,
+        proxies: bool,
         agent: OnceLock<Agent>,
     }
 
@@ -110,8 +111,16 @@ mod http {
         pub fn with_timeout(timeout: Duration) -> Self {
             Self {
                 timeout,
+                proxies: true,
                 agent: OnceLock::new(),
             }
+        }
+
+        /// The same retriever, ignoring the proxy environment variables (upstream's
+        /// `ProxyHandler({})`).
+        pub fn without_proxies(mut self) -> Self {
+            self.proxies = false;
+            self
         }
 
         fn agent(&self) -> &Agent {
@@ -145,7 +154,7 @@ mod http {
         /// `GET url` through the proxy the environment names for its scheme.
         fn get(&self, url: &str) -> Result<ureq::http::Response<ureq::Body>, RetrieveError> {
             let failed = |error: ureq::Error| RetrieveError::new(error.to_string());
-            let proxy = proxy_for(url)?;
+            let proxy = if self.proxies { proxy_for(url)? } else { None };
             let request = self.agent().get(url).config().proxy(proxy).build();
             request.call().map_err(failed)
         }

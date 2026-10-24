@@ -197,6 +197,30 @@ fn deep_nesting_cases() {
         started.elapsed()
     );
 
+    // Nodes shared through aliases are expanded by the round trip; the recursion error
+    // is found before anything that large is built (a chain of 10,000 aliases took
+    // gigabytes before).
+    let mut chain = String::from("a0: &a0 [0]\n");
+    for i in 1..10_000 {
+        chain.push_str(&format!("a{i}: &a{i} [*a{}]\n", i - 1));
+    }
+    let started = Instant::now();
+    assert_eq!(
+        load(chain.as_bytes(), "<file>").unwrap_err().message,
+        RECURSION
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // Shared nodes below the limit are still expanded in full.
+    let small = "a: &a [1, 2]\nb: [*a, *a]\n";
+    assert_eq!(
+        load(small.as_bytes(), "<file>").unwrap()["b"],
+        json!([[1, 2], [1, 2]])
+    );
+
     // Standard input has its own limit, three levels higher.
     let stdin_ok = "[".repeat(9_992) + &"]".repeat(9_992);
     assert!(load_text(stdin_ok.as_bytes(), "<stdin>", TextErrors::Strict).is_ok());

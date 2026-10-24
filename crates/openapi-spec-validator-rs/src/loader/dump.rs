@@ -20,13 +20,31 @@ enum Frame {
         items: ListRef,
         next: usize,
         out: Vec<Value>,
+        /// Dry run: how many containers deep the children reach (see `Encoder::depths`).
+        below: usize,
     },
     Dict {
         id: u32,
         next: usize,
         out: Map<String, Value>,
         key: String,
+        below: usize,
     },
+}
+
+impl Frame {
+    fn note_child(&mut self, reaches: usize) {
+        let below = match self {
+            Self::List { below, .. } | Self::Dict { below, .. } => below,
+        };
+        *below = (*below).max(reaches);
+    }
+
+    fn below(&self) -> usize {
+        match self {
+            Self::List { below, .. } | Self::Dict { below, .. } => *below,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -38,6 +56,9 @@ enum ListRef {
 enum Opened {
     Leaf(Value),
     Frame(Frame),
+    /// Dry run: a shared container already traversed without error, whose contents
+    /// reach this many containers below it.
+    Known(usize),
 }
 
 struct Encoder<'a> {
@@ -48,14 +69,41 @@ struct Encoder<'a> {
     depth_limit: usize,
     /// Strings can be moved out of the nodes when no node is reachable twice.
     move_strings: bool,
+    /// Only look for the error the encoder would raise, building nothing.
+    dry: bool,
+    /// Dry run: for each list and dict traversed without error, how many containers deep
+    /// its contents reach (an empty container counts one, a scalar none). A node shared
+    /// through aliases is then not walked again: at a new depth it either fits, or its
+    /// first error in traversal order is the recursion limit (it holds no other error).
+    list_depths: Vec<Option<usize>>,
+    dict_depths: Vec<Option<usize>>,
 }
 
+/// `check_first` runs the traversal once without building anything, so that an error
+/// (the recursion limit above all) is found before any value is materialised: when
+/// nodes are shared through aliases, the value can be far larger than the node graph,
+/// and `json.dumps` raises while holding only the text written so far.
 pub(super) fn to_value(
     nodes: &mut [Node],
     graph: &Graph,
     root: Obj,
     depth_limit: usize,
     move_strings: bool,
+    check_first: bool,
+) -> Result<Value, String> {
+    if check_first {
+        encode(nodes, graph, root, depth_limit, false, true)?;
+    }
+    encode(nodes, graph, root, depth_limit, move_strings, false)
+}
+
+fn encode(
+    nodes: &mut [Node],
+    graph: &Graph,
+    root: Obj,
+    depth_limit: usize,
+    move_strings: bool,
+    dry: bool,
 ) -> Result<Value, String> {
     let mut enc = Encoder {
         nodes,
@@ -64,10 +112,14 @@ pub(super) fn to_value(
         dict_marks: vec![false; graph.dicts.len()],
         depth_limit,
         move_strings,
+        dry,
+        list_depths: vec![None; if dry { graph.lists.len() } else { 0 }],
+        dict_depths: vec![None; if dry { graph.dicts.len() } else { 0 }],
     };
     let mut stack: Vec<Frame> = Vec::new();
     match enc.open(root, 0)? {
         Opened::Leaf(v) => return Ok(v),
+        Opened::Known(_) => return Ok(Value::Null),
         Opened::Frame(f) => stack.push(f),
     }
     loop {
@@ -94,17 +146,34 @@ pub(super) fn to_value(
             }
         };
         match child {
-            Some(obj) => match enc.open(obj, depth)? {
-                Opened::Leaf(v) => attach(top, v),
-                Opened::Frame(f) => stack.push(f),
-            },
+            Some(obj) => {
+                let container = matches!(obj, Obj::List(_) | Obj::Tuple(_) | Obj::Dict(_));
+                match enc.open(obj, depth)? {
+                    Opened::Leaf(v) => {
+                        if enc.dry {
+                            top.note_child(usize::from(container));
+                        } else {
+                            attach(top, v);
+                        }
+                    }
+                    Opened::Known(below) => top.note_child(below + 1),
+                    Opened::Frame(f) => stack.push(f),
+                }
+            }
             None => {
                 let Some(done) = stack.pop() else {
                     return Ok(Value::Null);
                 };
+                let below = done.below();
                 let value = enc.close(done);
                 match stack.last_mut() {
-                    Some(parent) => attach(parent, value),
+                    Some(parent) => {
+                        if enc.dry {
+                            parent.note_child(below + 1);
+                        } else {
+                            attach(parent, value);
+                        }
+                    }
                     None => return Ok(value),
                 }
             }
@@ -152,6 +221,7 @@ impl Encoder<'_> {
             Obj::Int(i) => Value::Number(i.into()),
             Obj::BigInt(id) => big_value(&self.graph.bigints[id as usize])?,
             Obj::Float(f) => Number::from_f64(f).map_or(Value::Null, Value::Number),
+            Obj::Str(_) if self.dry => Value::Null,
             Obj::Str(id) => Value::String(self.string(id)),
             Obj::Bytes => return Err(type_error("bytes")),
             Obj::Date => return Err(type_error("date")),
@@ -161,6 +231,19 @@ impl Encoder<'_> {
                 // Py_EnterRecursiveCall happens before the emptiness and circularity checks.
                 if parent_depth + 1 > self.depth_limit {
                     return Err(RECURSION.to_owned());
+                }
+                if self.dry {
+                    let known = match obj {
+                        Obj::List(id) => self.list_depths[id as usize],
+                        Obj::Dict(id) => self.dict_depths[id as usize],
+                        _ => None,
+                    };
+                    if let Some(below) = known {
+                        if parent_depth + 1 + below > self.depth_limit {
+                            return Err(RECURSION.to_owned());
+                        }
+                        return Ok(Opened::Known(below));
+                    }
                 }
                 let opened = self.open_container(obj);
                 if let Opened::Frame(frame) = &opened {
@@ -182,8 +265,9 @@ impl Encoder<'_> {
                 Opened::Frame(Frame::Dict {
                     id,
                     next: 0,
-                    out: Map::with_capacity(len),
+                    out: Map::with_capacity(if self.dry { 0 } else { len }),
                     key: String::new(),
+                    below: 0,
                 })
             }
             Obj::List(id) => {
@@ -194,7 +278,8 @@ impl Encoder<'_> {
                 Opened::Frame(Frame::List {
                     items: ListRef::List(id),
                     next: 0,
-                    out: Vec::with_capacity(len),
+                    out: Vec::with_capacity(if self.dry { 0 } else { len }),
+                    below: 0,
                 })
             }
             // Tuples (from !!omap / !!pairs) always hold two items and are never shared.
@@ -202,6 +287,7 @@ impl Encoder<'_> {
                 items: ListRef::Tuple(id),
                 next: 0,
                 out: Vec::with_capacity(2),
+                below: 0,
             }),
             _ => Opened::Leaf(Value::Null),
         }
@@ -209,14 +295,22 @@ impl Encoder<'_> {
 
     fn close(&mut self, frame: Frame) -> Value {
         match frame {
-            Frame::List { items, out, .. } => {
+            Frame::List {
+                items, out, below, ..
+            } => {
                 if let ListRef::List(id) = items {
                     self.list_marks[id as usize] = false;
+                    if self.dry {
+                        self.list_depths[id as usize] = Some(below);
+                    }
                 }
                 Value::Array(out)
             }
-            Frame::Dict { id, out, .. } => {
+            Frame::Dict { id, out, below, .. } => {
                 self.dict_marks[id as usize] = false;
+                if self.dry {
+                    self.dict_depths[id as usize] = Some(below);
+                }
                 Value::Object(out)
             }
         }
@@ -224,6 +318,7 @@ impl Encoder<'_> {
 
     fn key_string(&mut self, key: Obj) -> Result<String, String> {
         Ok(match key {
+            Obj::Str(_) if self.dry => String::new(),
             Obj::Str(id) => self.string(id),
             Obj::Float(f) => json_float(f),
             Obj::Nan(_) => "NaN".to_owned(),

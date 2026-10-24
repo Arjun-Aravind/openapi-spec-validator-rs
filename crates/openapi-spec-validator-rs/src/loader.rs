@@ -97,7 +97,15 @@ fn load_yaml(
         drop(parser);
         let (graph, root) = construct::construct(&mut doc, stream_name)?;
         let move_strings = !doc.has_aliases;
-        dump::to_value(&mut doc.nodes, &graph, root, depth_limit, move_strings)
+        // With aliases the value can dwarf the node graph: find the encoder's error first.
+        dump::to_value(
+            &mut doc.nodes,
+            &graph,
+            root,
+            depth_limit,
+            move_strings,
+            doc.has_aliases,
+        )
     };
     run().map_err(|message| LoadError { message })
 }

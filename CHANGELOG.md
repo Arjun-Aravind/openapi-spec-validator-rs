@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Reading a document whose aliases nest deeper than the limit no longer builds the
+  expanded value first: a 240 KB chain of 10,000 aliases took 3.8 GB before failing with
+  the recursion error (upstream holds 160 MB at that point); the error is now found
+  before anything is built.
+- A `$ref` whose pointer reaches into a string resolves as upstream resolves it: a
+  numeric segment yields that character (so `#/info/title/0` is validated as the schema
+  `'t'`), and any other segment fails with Python's `invalid literal for int()` message.
+  Both were reported as the pointer not existing.
+- The remote-reference tests no longer fail when a proxy is configured in the
+  environment; `HttpRetriever::without_proxies` ignores the proxy variables.
+
 ## [0.2.0] - 2026-10-24
 
 ### Added
@@ -79,5 +94,6 @@ First release: a Rust port of [openapi-spec-validator](https://github.com/python
   specs of the APIs.guru directory; see [COMPATIBILITY.md](COMPATIBILITY.md) for the
   remaining, documented differences.
 
+[Unreleased]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/releases/tag/v0.1.0

@@ -38,8 +38,12 @@ fn bad_default() -> Value {
     json!({"type": "integer", "default": "x"})
 }
 
+/// The built-in client, ignoring any proxy configured in the environment (which would
+/// capture the requests to the test server; `http_env.rs` covers proxies).
 fn retriever(timeout: Duration) -> Option<Arc<dyn Retrieve>> {
-    Some(Arc::new(HttpRetriever::with_timeout(timeout)))
+    Some(Arc::new(
+        HttpRetriever::with_timeout(timeout).without_proxies(),
+    ))
 }
 
 fn run(spec: &Value, retriever: Option<Arc<dyn Retrieve>>) -> Outcome {
@@ -76,7 +80,7 @@ fn remote_documents_are_fetched_and_validated() {
     assert_eq!(
         run(
             &spec(&server.url("/user.json")),
-            Some(Arc::new(HttpRetriever::new()))
+            Some(Arc::new(HttpRetriever::new().without_proxies()))
         ),
         Outcome::Valid
     );
