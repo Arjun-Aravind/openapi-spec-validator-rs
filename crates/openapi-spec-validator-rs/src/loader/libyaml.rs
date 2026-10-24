@@ -193,14 +193,21 @@ unsafe fn read_handler(data: *mut c_void, buffer: *mut u8, size: u64, size_read:
     }
 }
 
+/// libyaml's error strings. unsafe-libyaml declares them `*const i8` on every platform,
+/// while `c_char` is unsigned on some (AArch64 Linux).
+///
 /// # Safety
 /// `p` must be null or point to a NUL-terminated string.
-unsafe fn c_str(p: *const c_char) -> Option<String> {
+unsafe fn c_str(p: *const i8) -> Option<String> {
     if p.is_null() {
         None
     } else {
         // SAFETY: non-null and NUL-terminated per the contract.
-        Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { CStr::from_ptr(p.cast::<c_char>()) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 }
 
