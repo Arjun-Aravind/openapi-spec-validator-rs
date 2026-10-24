@@ -1,0 +1,9 @@
+# vacuum ruleset limited to checks openapi-spec-validator also performs (meta-schema
+# validity, unique operationIds, path parameters), so timings are not dominated by
+# style rules.
+extends: [[vacuum:oas, off]]
+rules:
+  oas2-schema: true
+  oas3-schema: true
+  operation-operationId-unique: true
+  path-params: true

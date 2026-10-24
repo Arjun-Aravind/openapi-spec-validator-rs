@@ -8,7 +8,7 @@ description.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
-include = ["src/**/*", "resources/**/*"]
+include = ["src/**/*", "resources/**/*", "LICENSE", "NOTICE"]
 
 [lib]
 name = "openapi_spec_validator_rs"

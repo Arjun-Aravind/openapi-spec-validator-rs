@@ -61,7 +61,7 @@ These behaviours look surprising but are reproduced on purpose:
 | Behaviour | Example |
 |---|---|
 | JSON files are parsed as YAML 1.1 and round-tripped through `json.dumps` | `yes` → `true`, `017` → `15`, unquoted `200:` keys become `"200"` |
-| JSON that libyaml cannot read is a read error, even if it is valid JSON | `"😀"` (how Python's `json.dump` writes emoji), tabs outside brackets, keys over 1022 characters |
+| JSON that libyaml cannot read is a read error, even if it is valid JSON | `"\ud83d\ude00"` (how Python's `json.dump` writes emoji), tabs outside brackets, keys over 1022 characters |
 | Read errors name the stream `<urllib response>` (upstream reads files through `urlopen`) | `while parsing a block mapping\n  in "<urllib response>", line 1, column 1` |
 | A non-string version is an error (exit 2), not a validation error | `swagger: 2.0` → `Error: expected string or bytes-like object, got 'float'` |
 | An unknown version is an error with an empty message | `openapi: 4.0.0` → `Error: ` |
@@ -83,9 +83,8 @@ These behaviours look surprising but are reproduced on purpose:
 | `$id` / `$anchor` | References to `$id`-identified resources or anchors are not resolved by the walker. | Rare in OpenAPI documents |
 | Extremely deep nesting | Upstream hits Python's recursion limit (`Error: maximum recursion depth exceeded`, exit 2) on schemas nested 122 or more levels deep through `properties` or `allOf` (163 through `items`). This port validates them. None of the 4,138 APIs.guru specs comes close. | Pathological documents |
 | NaN / Infinity, huge integers | YAML `.nan`/`.inf` load as `null`; integers beyond 64 bits load as floats. | Rare |
-| Error order | When the document, or a single schema, has several meta-schema violations, the one reported first may differ from upstream's, which follows Python's keyword iteration order. The verdict and error class are the same. On the APIs.guru corpus this affects the full `--validation-errors all` output of 3 of 4,138 specs and no first lines. | Output text only |
-| Error messages | Messages follow upstream's wording; the "Failed validating ..." detail block and best-match subschema hints may differ in places. For errors at the top level of the document, upstream prints its meta-schema as `<Proxy at 0x... wrapping {...}>`, including a memory address, which cannot be reproduced. | Output text only |
-| Set ordering | Upstream prints multiple undefined `required` properties, and unexpected additional properties, in Python set order (which varies between runs). This port uses document order. | Output text only |
+| Error output | Messages, "Failed validating ..." blocks, best-match hints and error order follow upstream; on the APIs.guru corpus the complete output is byte-identical for every rejected spec except in the two cases in this table. For errors at the top level of the document, upstream prints its meta-schema as `<Proxy at 0x... wrapping {...}>`, with a memory address, which cannot be reproduced. | Output text only |
+| Set ordering | Where upstream iterates a Python set, its output changes from run to run with the hash seed: the list of undefined `required` properties, unexpected additional properties, and which nested property is checked first under `additionalProperties`. This port uses document order. | Output text only |
 | Upstream with `jsonschema-rs` installed | Upstream switches to its optional `jsonschema-rs` backend automatically when that package is installed. That backend also checks `format` across the whole document, with ECMAScript regex rules, so for example `pattern: "(?P<n>a)"` fails there but passes the default backend. This port follows the default backend. | Specs with `format` violations outside schemas |
 
 ## Python API
@@ -156,7 +155,7 @@ Documents are read the way `json.loads` output looks: `dict` with `str` keys, `l
 * Results are not cached per validator: every call validates the document as it is at
   that moment (upstream caches `iter_errors()` per instance).
 * `openapi_spec_validator_rs.__main__.main()` returns normally when every file is valid
-  and raises `SystemExit` otherwise, like upstream's, but it reads `-` from the process's
-  standard input, not from a replaced `sys.stdin`. Program name, version and argument
-  error messages are this package's own (clap's instead of argparse's).
+  and raises `SystemExit` otherwise, like upstream's, and reads `-` from `sys.stdin`.
+  Program name, version and argument error messages are this package's own (clap's
+  instead of argparse's).
 * The GIL is released while documents are loaded, validated and errors rendered.

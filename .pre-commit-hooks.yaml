@@ -1,0 +1,6 @@
+- id: openapi-spec-validator-rs
+  name: openapi-spec-validator-rs
+  entry: openapi-spec-validator-rs
+  description: Validate OpenAPI and Swagger documents (a fast companion to openapi-spec-validator).
+  language: python
+  files: .*(openapi|swagger).*\.(json|yaml|yml)$
