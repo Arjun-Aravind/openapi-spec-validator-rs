@@ -20,6 +20,7 @@ use url::Url;
 
 use crate::loader;
 use crate::pyrepr;
+use crate::pyurl;
 use crate::retrieve::Retrieve;
 use crate::version::python_type_name;
 
@@ -168,10 +169,10 @@ impl<'a> Documents<'a> {
         let unresolvable = || LookupError::referencing("Unresolvable", reference.to_owned());
         let (uri, fragment) = match reference.strip_prefix('#') {
             Some(fragment) => (base.to_owned(), fragment.to_owned()),
+            // `urldefrag(urljoin(base, ref))`; a `ValueError` from either propagates.
             None => {
-                let joined = join_uri(base, reference).ok_or_else(unresolvable)?;
-                let (uri, fragment) = joined.split_once('#').unwrap_or((&joined, ""));
-                (uri.to_owned(), fragment.to_owned())
+                let joined = pyurl::urljoin(base, reference).map_err(Crash)?;
+                pyurl::urldefrag(&joined).map_err(Crash)?
             }
         };
         let doc = self.document_index(&uri);
@@ -181,15 +182,10 @@ impl<'a> Documents<'a> {
         self.fragment(doc, contents, &fragment)
     }
 
-    /// The URI documents are known by, as `$id`s and `$ref`s are joined with it.
+    /// The URI documents are known by, as `$id`s and `$ref`s are joined with it
+    /// (`urljoin`; a reference `urljoin` rejects is kept as written).
     pub fn join(base: &str, reference: &str) -> String {
-        if reference.is_empty() {
-            return base.to_owned();
-        }
-        if base.is_empty() {
-            return reference.to_owned();
-        }
-        join_uri(base, reference).unwrap_or_else(|| reference.to_owned())
+        pyurl::urljoin(base, reference).unwrap_or_else(|_| reference.to_owned())
     }
 
     fn document(&self, doc: usize) -> Option<&Value> {
@@ -217,9 +213,9 @@ impl<'a> Documents<'a> {
 
     /// Reads or fetches the document at `uri` the way upstream's default handlers do.
     fn retrieve(&self, uri: &str) -> Result<Value, String> {
-        let url = Url::parse(uri).map_err(|error| error.to_string())?;
-        match url.scheme() {
+        match pyurl::scheme(uri).as_str() {
             "file" => {
+                let url = Url::parse(uri).map_err(|error| error.to_string())?;
                 // urllib opens the URL's whole selector, query included, as the file name.
                 if url.query().is_some() {
                     return Err(format!("not a file path: {uri}"));
@@ -236,6 +232,8 @@ impl<'a> Documents<'a> {
                 let retriever = self
                     .retriever
                     .ok_or_else(|| "remote references are not retrieved".to_owned())?;
+                // The URL goes out exactly as upstream would send it: joined by Python's
+                // `urljoin`, never normalised or percent-encoded here.
                 let bytes = retriever.retrieve(uri).map_err(|error| error.message)?;
                 // An HTTP response has no name for PyYAML to report.
                 loader::load(&bytes, "<file>").map_err(|error| error.message)
@@ -481,18 +479,6 @@ impl<T> Arena<T> {
 
 fn strip_fragment(uri: &str) -> &str {
     uri.split_once('#').map_or(uri, |(base, _)| base)
-}
-
-/// `urljoin(base, reference)`; `None` when the result has no usable scheme.
-fn join_uri(base: &str, reference: &str) -> Option<String> {
-    if let Ok(absolute) = Url::parse(reference) {
-        return Some(absolute.to_string());
-    }
-    Url::parse(base)
-        .ok()?
-        .join(reference)
-        .ok()
-        .map(|url| url.to_string())
 }
 
 #[cfg(test)]

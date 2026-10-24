@@ -53,4 +53,9 @@ def retrieve(url: str) -> bytes:
         response.raise_for_status()
         return response.text.encode("utf-8")
     with closing(urlopen(url, timeout=TIMEOUT)) as response:
-        return response.read()
+        # Read in chunks as PyYAML reads a stream: a body cut short by the server is
+        # used as far as it goes, where `read()` would raise `IncompleteRead`.
+        chunks = []
+        while chunk := response.read(16384):
+            chunks.append(chunk)
+        return b"".join(chunks)

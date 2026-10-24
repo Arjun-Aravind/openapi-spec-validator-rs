@@ -41,6 +41,7 @@ mod pyregex;
 /// Python `repr`/`pprint` emulation, shared with the Python bindings. Not a supported API.
 #[doc(hidden)]
 pub mod pyrepr;
+mod pyurl;
 mod retrieve;
 mod schema_path;
 mod values;

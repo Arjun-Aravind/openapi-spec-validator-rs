@@ -16,6 +16,7 @@ __pycache__/
 
 # Local working notes and downloaded data
 /QUEUE.md
+/REVIEW.md
 /phase0
 /bench/data
 /bench/results

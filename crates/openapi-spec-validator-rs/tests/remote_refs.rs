@@ -5,10 +5,8 @@
 #![cfg(feature = "http")]
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::net::TcpListener;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openapi_spec_validator_rs::{
@@ -16,94 +14,9 @@ use openapi_spec_validator_rs::{
 };
 use serde_json::{Value, json};
 
-/// What the server answers for a path.
-#[derive(Clone)]
-enum Reply {
-    Body(Vec<u8>),
-    Status(u16),
-    Redirect(String),
-    /// Waits before sending anything.
-    Slow(Duration),
-    /// Sends the headers of a longer body, then nothing more.
-    Stall(Duration),
-}
+mod support;
 
-fn body(value: &Value) -> Reply {
-    Reply::Body(value.to_string().into_bytes())
-}
-
-struct Server {
-    base: String,
-    hits: Arc<Mutex<Vec<String>>>,
-}
-
-impl Server {
-    fn start(routes: Vec<(&'static str, Reply)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port is free");
-        let base = format!("http://{}", listener.local_addr().expect("bound"));
-        let hits = Arc::new(Mutex::new(Vec::new()));
-        let routes: Arc<HashMap<&str, Reply>> = Arc::new(routes.into_iter().collect());
-        let seen = Arc::clone(&hits);
-        thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let routes = Arc::clone(&routes);
-                let seen = Arc::clone(&seen);
-                thread::spawn(move || serve(stream, &routes, &seen));
-            }
-        });
-        Self { base, hits }
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
-    }
-
-    /// The request targets so far, in order.
-    fn hits(&self) -> Vec<String> {
-        self.hits.lock().expect("not poisoned").clone()
-    }
-}
-
-fn serve(mut stream: TcpStream, routes: &HashMap<&str, Reply>, hits: &Mutex<Vec<String>>) {
-    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
-    let mut line = String::new();
-    while reader.read_line(&mut line).is_ok() && line != "\r\n" && !line.is_empty() {
-        line.clear();
-    }
-    let target = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .to_owned();
-    hits.lock().expect("not poisoned").push(target.clone());
-    let path = target.split('?').next().unwrap_or("");
-    let (status, extra, payload): (u16, String, Vec<u8>) = match routes.get(path) {
-        None => (404, String::new(), b"<html>nope</html>".to_vec()),
-        Some(Reply::Body(bytes)) => (200, String::new(), bytes.clone()),
-        Some(Reply::Status(status)) => (*status, String::new(), b"boom".to_vec()),
-        Some(Reply::Redirect(to)) => (302, format!("Location: {to}\r\n"), Vec::new()),
-        Some(Reply::Slow(delay)) => {
-            thread::sleep(*delay);
-            (200, String::new(), b"{}".to_vec())
-        }
-        Some(Reply::Stall(delay)) => {
-            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{{");
-            let _ = stream.flush();
-            thread::sleep(*delay);
-            return;
-        }
-    };
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
-        payload.len()
-    );
-    let _ = stream.write_all(&payload);
-}
+use support::{Reply, Server, body};
 
 /// An OpenAPI 3.0 document whose only response schema is `$ref: reference`.
 fn spec(reference: &str) -> Value {
@@ -456,4 +369,115 @@ fn custom_retrievers_are_called_with_the_url() {
 fn the_default_options_fetch_remote_references() {
     assert!(Options::default().retriever.is_some());
     assert!(format!("{:?}", Options::default()).contains("retriever: Some"));
+}
+
+#[test]
+fn urls_are_requested_as_written_and_refused_as_urllib_refuses_them() {
+    let server = Server::start(vec![
+        ("/sub/../bad.json", body(&bad_default())),
+        ("/a b.json", body(&user())),
+        ("/user.json", body(&user())),
+    ]);
+    // Dot segments in an absolute reference are sent verbatim (`urljoin` leaves an
+    // absolute URL alone), and a space is refused before any request, as urllib does.
+    assert_eq!(
+        messages(run(
+            &spec(&server.url("/sub/../bad.json")),
+            retriever(TIMEOUT)
+        )),
+        ["'x' is not of type 'integer'"]
+    );
+    let space = server.url("/a b.json");
+    assert_eq!(
+        run(&spec(&space), retriever(TIMEOUT)),
+        Outcome::Error(space)
+    );
+    let userinfo = format!("http://u:p@{}/user.json", server.authority());
+    assert_eq!(
+        run(&spec(&userinfo), retriever(TIMEOUT)),
+        Outcome::Error(userinfo)
+    );
+    assert_eq!(server.hits(), ["/sub/../bad.json"]);
+}
+
+#[test]
+fn redirects_follow_urllib_rules() {
+    let server = Server::start(vec![
+        ("/user.json", body(&user())),
+        ("/loop", Reply::Redirect("/loop".to_owned())),
+        ("/to-file", Reply::Redirect("file:///etc/hosts".to_owned())),
+        ("/no-location", Reply::Status(302)),
+        ("/c1", Reply::Redirect("/c2".to_owned())),
+        ("/c2", Reply::Redirect("/c3".to_owned())),
+        ("/c3", Reply::Redirect("/c4".to_owned())),
+        ("/c4", Reply::Redirect("/c5".to_owned())),
+        ("/c5", Reply::Redirect("/c6".to_owned())),
+        ("/c6", Reply::Redirect("/c7".to_owned())),
+        ("/c7", Reply::Redirect("/c8".to_owned())),
+        ("/c8", Reply::Redirect("/c9".to_owned())),
+        ("/c9", Reply::Redirect("/c10".to_owned())),
+        ("/c10", Reply::Redirect("/c11".to_owned())),
+        ("/c11", Reply::Redirect("/user.json".to_owned())),
+        ("/spaced", Reply::Redirect("/user .json".to_owned())),
+        ("/user%20.json", body(&user())),
+        ("/304", Reply::Status(304)),
+    ]);
+    // The same URL is visited at most four times: five requests, as urllib makes.
+    let reference = server.url("/loop");
+    assert_eq!(
+        run(&spec(&reference), retriever(TIMEOUT)),
+        Outcome::Error(reference)
+    );
+    assert_eq!(server.hits(), ["/loop"; 5]);
+    // A redirect to another scheme is refused without a request.
+    let reference = server.url("/to-file");
+    assert_eq!(
+        run(&spec(&reference), retriever(TIMEOUT)),
+        Outcome::Error(reference)
+    );
+    assert_eq!(server.hits().len(), 6);
+    // A redirect without a Location is an error status.
+    let reference = server.url("/no-location");
+    assert_eq!(
+        run(&spec(&reference), retriever(TIMEOUT)),
+        Outcome::Error(reference)
+    );
+    // Ten redirections are followed, the eleventh is not.
+    let reference = server.url("/c1");
+    assert_eq!(
+        run(&spec(&reference), retriever(TIMEOUT)),
+        Outcome::Error(reference)
+    );
+    assert_eq!(server.hits().len(), 7 + 11);
+    // A space in a Location is percent-encoded, as urllib does.
+    assert_eq!(
+        run(&spec(&server.url("/spaced")), retriever(TIMEOUT)),
+        Outcome::Valid
+    );
+    assert_eq!(
+        server.hits().last().map(String::as_str),
+        Some("/user%20.json")
+    );
+    // Only 2xx is success: urllib raises for a 304.
+    let reference = server.url("/304");
+    assert_eq!(
+        run(&spec(&reference), retriever(TIMEOUT)),
+        Outcome::Error(reference)
+    );
+}
+
+#[test]
+fn a_body_cut_short_is_used_as_far_as_it_arrived() {
+    let partial = bad_default().to_string().into_bytes();
+    let server = Server::start(vec![(
+        "/truncated.json",
+        Reply::Truncated(partial.clone(), partial.len() + 1000),
+    )]);
+    assert_eq!(
+        messages(run(
+            &spec(&server.url("/truncated.json")),
+            retriever(TIMEOUT)
+        )),
+        ["'x' is not of type 'integer'"]
+    );
 }

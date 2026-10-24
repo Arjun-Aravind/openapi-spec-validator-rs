@@ -15,8 +15,10 @@ All notable changes to this project are documented here. The format follows
   (`Error: <ref>`, exit status 2). The Python package downloads with Python's `urllib`,
   or `requests` when that package is installed, exactly as upstream's handlers do; the
   Rust command line and library use a built-in client (the `http` feature of the
-  library crate, on by default) that checks certificates against the operating system's
-  store and reads proxies from the environment. See COMPATIBILITY.md for the details.
+  library crate, on by default) that requests the URL as `urljoin` forms it, follows
+  redirects with `urllib`'s rules, checks certificates against the operating system's
+  store and reads `http_proxy`, `https_proxy` and `no_proxy` as `urllib` does. See
+  COMPATIBILITY.md for the details.
 - The `Retrieve` trait and `Options::retriever` in the library crate: how remote
   documents are fetched, or `None` to leave such references unresolvable.
 - Wheels for musl-based Linux (Alpine), x86_64 and aarch64.

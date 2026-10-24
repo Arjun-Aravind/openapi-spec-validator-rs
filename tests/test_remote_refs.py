@@ -135,15 +135,22 @@ def test_remote_documents_are_fetched_and_validated(server: Server) -> None:
     assert server.hits == ["/user.json", "/bad-default.json", "/doc.yaml"]
 
 
-def test_failures_make_the_reference_unresolvable(server: Server) -> None:
+def test_failures_make_the_reference_unresolvable(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    # With `requests` installed a space would be quoted and a 304 accepted, as upstream
+    # does then (see test_same_as_upstream); these are urllib's rules.
+    monkeypatch.setattr(handlers, "_requests", None)
     server.routes["/500"] = (500, b"boom", {})
+    server.routes["/304"] = (304, b"", {})
     server.routes["/loop"] = (302, b"", {"Location": "/loop"})
     server.serve("/bad.yaml", b"a: [\n", "text/plain")
+    server.serve("/a b.json", USER)
     for reference in [
         server.url("/missing.json"),
         server.url("/500"),
+        server.url("/304"),
         server.url("/loop"),
         server.url("/bad.yaml"),
+        server.url("/a b.json"),
         "https://127.0.0.1:1/user.json",
         "ftp://127.0.0.1/user.json",
     ]:
@@ -216,6 +223,32 @@ def test_command_line(server: Server, write: Callable[[str, str], Path], capsys:
         main([str(missing)])
     assert info.value.code == 2
     assert capsys.readouterr().out == f"{missing}: Error: {server.url('/missing.json')}\n"
+
+
+def test_urllib_handler_uses_a_body_cut_short(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Truncating(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BAD_DEFAULT) + 1000))
+            self.end_headers()
+            self.wfile.write(BAD_DEFAULT)
+            self.close_connection = True
+
+    truncating = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Truncating)
+    threading.Thread(target=truncating.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(handlers, "_requests", None)
+        url = f"http://127.0.0.1:{truncating.server_address[1]}/truncated.json"
+        # PyYAML reads the stream in chunks, so upstream validates what arrived.
+        with pytest.raises(osv.OpenAPIValidationError) as info:
+            osv.validate(spec(url))
+        assert info.value.message == "'x' is not of type 'integer'"
+    finally:
+        truncating.shutdown()
+        truncating.server_close()
 
 
 def test_handler_timeout(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -379,6 +412,8 @@ def remote_cases(server: Server) -> dict[str, dict[str, Any]]:
     server.serve("/bad.yaml", b"a: [\n", "text/plain")
     server.serve("/param.json", json.dumps({"name": "q", "in": "query", "type": "integer", "default": "badparam"}).encode())
     server.routes["/500"] = (500, b"boom", {})
+    server.routes["/304"] = (304, b"", {})
+    server.serve("/a b.json", USER)
     server.routes["/redirect"] = (302, b"", {"Location": "/user.json"})
     server.routes["/loop"] = (302, b"", {"Location": "/loop"})
 
@@ -398,6 +433,10 @@ def remote_cases(server: Server) -> dict[str, dict[str, Any]]:
         "loop": spec(server.url("/loop")),
         "refused": spec("http://127.0.0.1:1/user.json"),
         "https-to-plain": spec(user.replace("http://", "https://")),
+        "dot-segments": spec(server.url("/sub/../bad-default.json")),
+        "space": spec(server.url("/a b.json")),
+        "304": spec(server.url("/304")),
+        "userinfo": spec(user.replace("http://", "http://u:p@")),
         "lazy": lazy_spec(bad),
         "swagger-param": {
             "swagger": "2.0",
