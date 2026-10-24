@@ -4,7 +4,11 @@
 //! arguments (checked with `scripts/compare_output.py`), so a changed snapshot is a
 //! compatibility change.
 
-use openapi_spec_validator_rs_cli::run;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use openapi_spec_validator_rs::{Retrieve, RetrieveError};
+use openapi_spec_validator_rs_cli::{run, run_with_stdin};
 
 /// Runs the CLI from the crate directory with fixture paths relative to it.
 fn cli(args: &[&str]) -> String {
@@ -139,4 +143,74 @@ fn best_match_hint_in_python_order() {
 #[test]
 fn meta_schema_path_through_dynamic_ref() {
     insta::assert_snapshot!(cli(&["oas31-nested-schema-error.yaml"]));
+}
+
+/// Runs the CLI on `document` from stdin, with `$ref`s to `https://example.com/...`
+/// served from `remote` instead of the network (output as for a reachable server).
+fn cli_remote(args: &[&str], document: &str, remote: &[(&str, &str)]) -> String {
+    let documents: HashMap<String, Vec<u8>> = remote
+        .iter()
+        .map(|(path, body)| {
+            (
+                format!("https://example.com{path}"),
+                body.as_bytes().to_vec(),
+            )
+        })
+        .collect();
+    let retriever: Arc<dyn Retrieve> = Arc::new(move |url: &str| {
+        documents
+            .get(url)
+            .cloned()
+            .ok_or_else(|| RetrieveError::new("not found"))
+    });
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut stdin = std::io::Cursor::new(document.as_bytes().to_vec());
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    let code = run_with_stdin(&args, &mut stdin, Some(retriever), &mut out, &mut err);
+    format!(
+        "exit code: {code}\n----- stdout -----\n{}----- stderr -----\n{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    )
+}
+
+const REMOTE_REF: &str = "openapi: 3.0.0
+info: {title: t, version: '1'}
+paths:
+  /u:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: https://example.com/schemas/user.json
+";
+
+#[test]
+fn remote_ref_valid() {
+    insta::assert_snapshot!(cli_remote(
+        &["-"],
+        REMOTE_REF,
+        &[("/schemas/user.json", r#"{"type": "object"}"#)],
+    ));
+}
+
+#[test]
+fn remote_ref_invalid_default() {
+    insta::assert_snapshot!(cli_remote(
+        &["-"],
+        REMOTE_REF,
+        &[(
+            "/schemas/user.json",
+            r#"{"type": "integer", "default": "x"}"#
+        )],
+    ));
+}
+
+#[test]
+fn remote_ref_unresolvable() {
+    insta::assert_snapshot!(cli_remote(&["-"], REMOTE_REF, &[]));
 }

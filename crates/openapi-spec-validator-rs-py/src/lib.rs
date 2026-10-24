@@ -5,11 +5,14 @@
 
 mod convert;
 mod errors;
+mod retrieve;
 mod stack;
+
+use std::sync::Arc;
 
 use clap::Parser;
 use openapi_spec_validator_rs::{
-    DetectError, ErrorMode, LoadError, Options, Outcome, SpecVersion, detect_version,
+    DetectError, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, detect_version,
 };
 use openapi_spec_validator_rs_cli::Args;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -18,6 +21,7 @@ use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyType;
 
 use crate::convert::{to_python, to_value};
+use crate::retrieve::PyRetriever;
 
 // Converting and parsing large documents makes millions of small allocations.
 #[global_allocator]
@@ -47,7 +51,12 @@ fn parse_version(version: &str) -> PyResult<SpecVersion> {
         .ok_or_else(|| PyValueError::new_err(format!("unknown spec version: {version:?}")))
 }
 
-fn options(version: SpecVersion, base_uri: String, all_errors: bool) -> Options {
+fn options(
+    version: SpecVersion,
+    base_uri: String,
+    all_errors: bool,
+    retriever: Option<&Arc<PyRetriever>>,
+) -> Options {
     Options {
         version: Some(version),
         errors: if all_errors {
@@ -56,6 +65,21 @@ fn options(version: SpecVersion, base_uri: String, all_errors: bool) -> Options 
             ErrorMode::First
         },
         base_uri,
+        retriever: retriever.map(|retriever| Arc::clone(retriever) as Arc<dyn Retrieve>),
+    }
+}
+
+/// The retriever around `callable`, a Python function `(url: str) -> bytes` fetching
+/// `http(s)://` `$ref` targets; `None` leaves such references unresolvable.
+fn retriever(callable: Option<Py<PyAny>>) -> Option<Arc<PyRetriever>> {
+    callable.map(|callable| Arc::new(PyRetriever::new(callable)))
+}
+
+/// Re-raises a `KeyboardInterrupt` or `SystemExit` the retriever met.
+fn check_interrupt(retriever: Option<&Arc<PyRetriever>>) -> PyResult<()> {
+    match retriever.and_then(|retriever| retriever.interrupt()) {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -70,16 +94,24 @@ fn into_errors(py: Python<'_>, outcome: Outcome) -> PyResult<Vec<CoreError>> {
 }
 
 /// Validates a spec given as Python objects, as the given version (`"2.0"`, `"3.0"`,
-/// `"3.1"` or `"3.2"`).
+/// `"3.1"` or `"3.2"`). `retriever` fetches `http(s)://` `$ref` targets.
 #[pyfunction]
+#[pyo3(signature = (spec, version, base_uri, all_errors, retriever=None))]
 fn validate(
     py: Python<'_>,
     spec: &Bound<'_, PyAny>,
     version: &str,
     base_uri: String,
     all_errors: bool,
+    retriever: Option<Py<PyAny>>,
 ) -> PyResult<Vec<CoreError>> {
-    let options = options(parse_version(version)?, base_uri, all_errors);
+    let retriever = self::retriever(retriever);
+    let options = options(
+        parse_version(version)?,
+        base_uri,
+        all_errors,
+        retriever.as_ref(),
+    );
     let spec = spec.as_unbound();
     let outcome = stack::run(py, || {
         let value = Python::attach(|py| to_value(spec.bind(py)))?;
@@ -88,6 +120,7 @@ fn validate(
         drop(value);
         Ok(outcome)
     })?;
+    check_interrupt(retriever.as_ref())?;
     into_errors(py, outcome)
 }
 
@@ -99,7 +132,7 @@ enum BytesFailure {
 /// Parses a document read from a binary stream named `stream_name` (as upstream's
 /// reader does) and validates it, detecting the version unless one is given.
 #[pyfunction]
-#[pyo3(signature = (data, stream_name, base_uri, version, all_errors))]
+#[pyo3(signature = (data, stream_name, base_uri, version, all_errors, retriever=None))]
 fn validate_bytes(
     py: Python<'_>,
     data: PyBackedBytes,
@@ -107,8 +140,10 @@ fn validate_bytes(
     base_uri: String,
     version: Option<&str>,
     all_errors: bool,
+    retriever: Option<Py<PyAny>>,
 ) -> PyResult<Vec<CoreError>> {
     let version = version.map(parse_version).transpose()?;
+    let retriever = self::retriever(retriever);
     let result = stack::run(py, || {
         Ok(load_and_validate(
             &data,
@@ -116,8 +151,10 @@ fn validate_bytes(
             version,
             base_uri,
             all_errors,
+            retriever.as_ref(),
         ))
     })?;
+    check_interrupt(retriever.as_ref())?;
     match result {
         Ok(outcome) => into_errors(py, outcome),
         Err(BytesFailure::Load(error)) => Err(exception(py, "SpecReadError", (error.message,))),
@@ -137,13 +174,14 @@ fn load_and_validate(
     version: Option<SpecVersion>,
     base_uri: String,
     all_errors: bool,
+    retriever: Option<&Arc<PyRetriever>>,
 ) -> Result<Outcome, BytesFailure> {
     let spec = openapi_spec_validator_rs::load(data, stream_name).map_err(BytesFailure::Load)?;
     let version = match version {
         Some(version) => version,
         None => detect_version(&spec).map_err(BytesFailure::Detect)?,
     };
-    let options = options(version, base_uri, all_errors);
+    let options = options(version, base_uri, all_errors, retriever);
     Ok(openapi_spec_validator_rs::validate(&spec, &options))
 }
 
@@ -175,27 +213,40 @@ fn load<'py>(
 /// validation run returns normally.
 ///
 /// `stdin`, when given, is read for the `-` file instead of the process's standard input.
+/// `retriever` fetches `http(s)://` `$ref` targets.
 #[pyfunction]
-#[pyo3(signature = (args, stdin=None))]
+#[pyo3(signature = (args, stdin=None, retriever=None))]
 fn cli_main(
     py: Python<'_>,
     args: Vec<String>,
     stdin: Option<PyBackedBytes>,
-) -> (i32, String, String, bool) {
-    py.detach(move || {
+    retriever: Option<Py<PyAny>>,
+) -> PyResult<(i32, String, String, bool)> {
+    let retriever = self::retriever(retriever);
+    let result = py.detach(|| {
         let argv =
             std::iter::once("openapi-spec-validator-rs").chain(args.iter().map(String::as_str));
         let ran = Args::try_parse_from(argv).is_ok();
         let mut out = Vec::new();
         let mut err = Vec::new();
+        let fetch = retriever
+            .as_ref()
+            .map(|retriever| Arc::clone(retriever) as Arc<dyn Retrieve>);
         let code = match stdin {
             Some(data) => openapi_spec_validator_rs_cli::run_with_stdin(
                 &args,
                 &mut std::io::Cursor::new(&*data),
+                fetch,
                 &mut out,
                 &mut err,
             ),
-            None => openapi_spec_validator_rs_cli::run(&args, &mut out, &mut err),
+            None => openapi_spec_validator_rs_cli::run_with_stdin(
+                &args,
+                &mut std::io::stdin(),
+                fetch,
+                &mut out,
+                &mut err,
+            ),
         };
         (
             code,
@@ -203,7 +254,9 @@ fn cli_main(
             String::from_utf8_lossy(&err).into_owned(),
             ran,
         )
-    })
+    });
+    check_interrupt(retriever.as_ref())?;
+    Ok(result)
 }
 
 #[pymodule]

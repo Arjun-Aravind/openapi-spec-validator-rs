@@ -1,0 +1,14 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli_remote(&[\"-\"], REMOTE_REF,\n&[(\"/schemas/user.json\", r#\"{\"type\": \"integer\", \"default\": \"x\"}\"#)],)"
+---
+exit code: 1
+----- stdout -----
+stdin: Validation Error: 'x' is not of type 'integer'
+
+Failed validating 'type' in schema:
+    {'type': 'integer', 'default': 'x'}
+
+On instance:
+    'x'
+----- stderr -----

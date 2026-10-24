@@ -9,6 +9,12 @@
 //!    defined properties, `default` values are validated, and operation IDs,
 //!    parameters, path parameters and tags are checked.
 //!
+//! `$ref`s to other documents are followed like upstream's: relative references are
+//! resolved against [`Options::base_uri`], `file://` documents are read from disk, and
+//! `http://` and `https://` documents are downloaded when a reference to them is first
+//! reached (see [`Retrieve`]; the built-in client needs the `http` feature, on by
+//! default).
+//!
 //! ```
 //! use openapi_spec_validator_rs::{validate, Options, Outcome};
 //!
@@ -35,6 +41,7 @@ mod pyregex;
 /// Python `repr`/`pprint` emulation, shared with the Python bindings. Not a supported API.
 #[doc(hidden)]
 pub mod pyrepr;
+mod retrieve;
 mod schema_path;
 mod values;
 pub mod version;
@@ -44,7 +51,9 @@ mod pycompat_tests;
 #[cfg(test)]
 mod pyregex_tests;
 
+use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -54,6 +63,9 @@ use crate::keywords::{Stop, Walker};
 pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError, best_match};
 pub use crate::loader::{LoadError, TextErrors, load, load_text};
 pub use crate::pyrepr::PathItem;
+#[cfg(feature = "http")]
+pub use crate::retrieve::HttpRetriever;
+pub use crate::retrieve::{Retrieve, RetrieveError};
 pub use crate::version::{DetectError, SpecVersion, detect_version};
 
 /// How many errors to collect.
@@ -67,15 +79,54 @@ pub enum ErrorMode {
 }
 
 /// Validation settings.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub struct Options {
     /// Validate as this version instead of detecting it from the document.
     pub version: Option<SpecVersion>,
     /// Stop at the first error or collect all of them.
     pub errors: ErrorMode,
-    /// URI of the document, used to resolve relative `$ref`s to other files
+    /// URI of the document, used to resolve relative `$ref`s to other documents
     /// (e.g. `file:///path/to/openapi.yaml`). Empty means no base.
     pub base_uri: String,
+    /// How documents that `http://` and `https://` `$ref`s point to are downloaded.
+    /// `None` makes every such reference unresolvable. The default, with the `http`
+    /// feature, is [`HttpRetriever`], which behaves like upstream's handler.
+    pub retriever: Option<Arc<dyn Retrieve>>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            version: None,
+            errors: ErrorMode::default(),
+            base_uri: String::new(),
+            retriever: default_retriever(),
+        }
+    }
+}
+
+impl fmt::Debug for Options {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Options")
+            .field("version", &self.version)
+            .field("errors", &self.errors)
+            .field("base_uri", &self.base_uri)
+            .field(
+                "retriever",
+                &self.retriever.as_ref().map(|_| "dyn Retrieve"),
+            )
+            .finish()
+    }
+}
+
+#[cfg(feature = "http")]
+fn default_retriever() -> Option<Arc<dyn Retrieve>> {
+    Some(Arc::new(HttpRetriever::new()))
+}
+
+#[cfg(not(feature = "http"))]
+fn default_retriever() -> Option<Arc<dyn Retrieve>> {
+    None
 }
 
 /// Validates an already-parsed spec document.
@@ -93,6 +144,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     };
     let first_only = options.errors == ErrorMode::First;
     let base_uri = options.base_uri.as_str();
+    let retriever = options.retriever.as_deref();
 
     // Upstream checks the whole document against the meta-schema first, then walks it.
     // The two are independent, so on large documents they run concurrently; the results
@@ -100,7 +152,9 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let (document_errors, walk) = std::thread::scope(|scope| {
         if spec_is_large(spec) {
             let document = on_large_stack(scope, || document_errors(spec, version));
-            let walk = on_large_stack(scope, || walk(spec, version, first_only, base_uri));
+            let walk = on_large_stack(scope, || {
+                walk(spec, version, first_only, base_uri, retriever)
+            });
             (document.join(), walk.join())
         } else {
             on_large_stack(scope, || {
@@ -108,7 +162,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
                 if first_only && !errors.is_empty() {
                     (errors, Ok(Vec::new()))
                 } else {
-                    (errors, walk(spec, version, first_only, base_uri))
+                    (errors, walk(spec, version, first_only, base_uri, retriever))
                 }
             })
             .join()
@@ -210,8 +264,9 @@ fn walk(
     version: SpecVersion,
     first_only: bool,
     base_uri: &str,
+    retriever: Option<&dyn Retrieve>,
 ) -> Result<Vec<ValidationError>, String> {
-    let docs = Documents::new(spec, base_uri);
+    let docs = Documents::new(spec, base_uri, retriever);
     let mut walker = Walker::new(&docs, version, first_only);
     match walker.root(docs.root()) {
         Err(Stop::Crash(message)) => Err(message),

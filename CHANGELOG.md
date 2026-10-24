@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `$ref`s to `http://` and `https://` documents are followed, as openapi-spec-validator
+  follows them: the document is downloaded when validation first reaches a reference to
+  it, once per validation, parsed like a file, and any failure (network or TLS error,
+  error status, 10 second timeout, unparsable body) makes the reference unresolvable
+  (`Error: <ref>`, exit status 2). The Python package downloads with Python's `urllib`,
+  or `requests` when that package is installed, exactly as upstream's handlers do; the
+  Rust command line and library use a built-in client (the `http` feature of the
+  library crate, on by default) that checks certificates against the operating system's
+  store and reads proxies from the environment. See COMPATIBILITY.md for the details.
+- The `Retrieve` trait and `Options::retriever` in the library crate: how remote
+  documents are fetched, or `None` to leave such references unresolvable.
+
+### Changed
+
+- Documents named by `$ref`s are read when a reference to them is first followed, like
+  upstream, instead of all being read before validation starts; references inside
+  examples and extensions are no longer read at all.
+- `openapi_spec_validator_rs_cli::run_with_stdin` takes the retriever to use.
+
 ## [0.1.0] - 2026-10-24
 
 First release: a Rust port of [openapi-spec-validator](https://github.com/python-openapi/openapi-spec-validator)
@@ -39,4 +62,5 @@ First release: a Rust port of [openapi-spec-validator](https://github.com/python
   specs of the APIs.guru directory; see [COMPATIBILITY.md](COMPATIBILITY.md) for the
   remaining, documented differences.
 
+[Unreleased]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/releases/tag/v0.1.0

@@ -1622,7 +1622,7 @@ mod tests {
             std::thread::Builder::new()
                 .stack_size(64 << 20)
                 .spawn_scoped(scope, || {
-                    let docs = Documents::new(spec_schema, "");
+                    let docs = Documents::new(spec_schema, "", None);
                     let mut regexes = HashMap::new();
                     let found = Evaluator::run(
                         &docs,
@@ -1734,7 +1734,7 @@ mod tests {
     fn first_error_stops_evaluation() {
         // `maximum` would raise, but the consumer stops at the `type` error before it.
         let schema = json!({"type": "string", "maximum": "z"});
-        let docs = Documents::new(&schema, "");
+        let docs = Documents::new(&schema, "", None);
         let mut regexes = HashMap::new();
         let first = Evaluator::run(
             &docs,

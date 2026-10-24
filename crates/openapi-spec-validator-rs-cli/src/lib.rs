@@ -8,12 +8,12 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
-    ErrorMode, LoadError, Options, Outcome, SpecVersion, TextErrors, ValidationError, best_match,
-    load_text, validate, validate_path,
+    ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, TextErrors, ValidationError,
+    best_match, load_text, validate, validate_path,
 };
 use rayon::prelude::*;
 
@@ -68,20 +68,25 @@ pub enum ValidationErrors {
 }
 
 /// Runs the CLI with `args` (excluding the program name), writing to `out` and
-/// `err`, and returns the process exit code.
+/// `err`, and returns the process exit code. `http(s)://` `$ref`s are fetched with the
+/// library's default retriever (the built-in client when the `http` feature is on).
 pub fn run<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    run_with_stdin(args, &mut std::io::stdin(), out, err)
+    let retriever = Options::default().retriever;
+    run_with_stdin(args, &mut std::io::stdin(), retriever, out, err)
 }
 
 /// Like [`run`], reading the `-` file from `stdin` instead of the process's standard
-/// input (the Python package passes a replaced `sys.stdin` this way).
+/// input and fetching `http(s)://` `$ref`s with `retriever` (`None` leaves them
+/// unresolvable). The Python package passes a replaced `sys.stdin` and its own
+/// retriever this way.
 pub fn run_with_stdin<I, T>(
     args: I,
     stdin: &mut (dyn Read + Send),
+    retriever: Option<Arc<dyn Retrieve>>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32
@@ -101,12 +106,13 @@ where
         }
     };
     // An I/O error here is a broken pipe or similar: nothing sensible left to report.
-    execute(&args, &Mutex::new(stdin), out, err).unwrap_or(1)
+    execute(&args, &Mutex::new(stdin), retriever, out, err).unwrap_or(1)
 }
 
 fn execute(
     args: &Args,
     stdin: &Mutex<&mut (dyn Read + Send)>,
+    retriever: Option<Arc<dyn Retrieve>>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> std::io::Result<i32> {
@@ -118,6 +124,7 @@ fn execute(
             ValidationErrors::All => ErrorMode::All,
         },
         base_uri: String::new(),
+        retriever,
     };
 
     let validate_all = || -> Vec<FileResult> {

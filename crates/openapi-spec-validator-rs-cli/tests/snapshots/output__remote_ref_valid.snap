@@ -1,0 +1,8 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli_remote(&[\"-\"], REMOTE_REF,\n&[(\"/schemas/user.json\", r#\"{\"type\": \"object\"}\"#)],)"
+---
+exit code: 0
+----- stdout -----
+stdin: OK
+----- stderr -----

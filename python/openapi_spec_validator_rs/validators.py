@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Iterator, Mapping
 from typing import Any, ClassVar
 
-from openapi_spec_validator_rs import _core
+from openapi_spec_validator_rs import _core, handlers
 from openapi_spec_validator_rs.exceptions import OpenAPIValidationError, _from_core
 from openapi_spec_validator_rs.versions import (
     OPENAPIV2,
@@ -33,7 +33,8 @@ class SpecValidator:
     ``schema`` is the parsed document (``dict``, ``list``, ``str``, ``int``, ``float``,
     ``bool``, ``None``; tuples count as lists) or a jsonschema-path ``SchemaPath``.
     ``base_uri`` is the document's location, used to resolve relative ``$ref``s to
-    other files (e.g. ``file:///path/to/openapi.yaml``).
+    other documents (e.g. ``file:///path/to/openapi.yaml``). ``http(s)://`` documents
+    are downloaded as upstream downloads them (see :mod:`~openapi_spec_validator_rs.handlers`).
 
     Every call validates the document as it is at that moment.
     """
@@ -82,7 +83,11 @@ class SpecValidator:
     def _errors(self, all_errors: bool) -> list[OpenAPIValidationError]:
         version = self.spec_version
         errors = _core.validate(
-            self.schema, f"{version.major}.{version.minor}", self.base_uri, all_errors
+            self.schema,
+            f"{version.major}.{version.minor}",
+            self.base_uri,
+            all_errors,
+            handlers.retrieve,
         )
         return [_from_core(error) for error in errors]
 

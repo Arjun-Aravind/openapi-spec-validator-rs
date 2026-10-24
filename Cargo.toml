@@ -18,8 +18,8 @@ keywords = ["openapi", "swagger", "validation", "jsonschema"]
 categories = ["command-line-utilities", "development-tools", "web-programming"]
 
 [workspace.dependencies]
-openapi-spec-validator-rs = { path = "crates/openapi-spec-validator-rs", version = "0.1.0" }
-openapi-spec-validator-rs-cli = { path = "crates/openapi-spec-validator-rs-cli", version = "0.1.0" }
+openapi-spec-validator-rs = { path = "crates/openapi-spec-validator-rs", version = "0.1.0", default-features = false }
+openapi-spec-validator-rs-cli = { path = "crates/openapi-spec-validator-rs-cli", version = "0.1.0", default-features = false }
 
 anyhow = "1.0.104"
 base64 = "0.23.1"
@@ -35,6 +35,7 @@ referencing = "0.60.1"
 serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order"] }
 thiserror = "2.0.21"
 unsafe-libyaml = "0.2.11"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "platform-verifier"] }
 url = "2.5.8"
 
 [profile.release]

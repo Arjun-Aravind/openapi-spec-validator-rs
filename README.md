@@ -72,7 +72,10 @@ It accepts the same arguments (`--schema {detect,2.0,3.0,3.1,3.2}`,
 `--validation-errors {first,all}`, `--subschema-errors {best-match,all}`, `-` for standard
 input), prints the same messages and exits with the same status: 0 when valid, 1 for a
 validation or read error, 2 for any other error. Several files are validated in parallel
-and reported in order.
+and reported in order. `$ref`s to other files and to `http(s)://` URLs are followed as
+upstream follows them: the `pip`-installed command fetches with Python's `urllib` (or
+`requests`, when installed) like upstream, the Rust binary with a built-in client that
+uses the operating system's certificate store and the `HTTPS_PROXY`/`NO_PROXY` variables.
 
 ## Python
 
@@ -170,9 +173,10 @@ PyO3 bindings on top. It follows the reference implementation step by step:
    through the same JSON round trip.
 2. **Meta-schema**: the whole document is validated against the official schema for its
    version with the [`jsonschema`](https://crates.io/crates/jsonschema) crate.
-3. **Walk**: the document is walked like `keywords.py`, following `$ref`s, checking every
-   reachable schema against its dialect, `default` values against their schemas, and
-   operation IDs, parameters, path templates and tags.
+3. **Walk**: the document is walked like `keywords.py`, following `$ref`s (into other
+   files and over HTTP, fetched when first reached), checking every reachable schema
+   against its dialect, `default` values against their schemas, and operation IDs,
+   parameters, path templates and tags.
 
 Python-specific behaviour (`re` syntax, `str.format` parsing of path templates, `repr` in
 messages, format checks) is reproduced by small modules tested against CPython.
@@ -180,8 +184,9 @@ messages, format checks) is reproduced by small modules tested against CPython.
 ## Compatibility
 
 See [COMPATIBILITY.md][compatibility]. In short: verdicts match openapi-spec-validator
-0.9.0's default installation. Remote (`http://`) `$ref`s are not fetched, and a handful of
-pathological inputs (schemas nested over 120 levels deep, NaN literals) behave differently.
+0.9.0's default installation, `$ref`s to other files and to `http(s)://` URLs included; a
+handful of pathological inputs (schemas nested over 120 levels deep, NaN literals) behave
+differently.
 
 ## License
 

@@ -6,10 +6,12 @@
 //! are JSON pointers into the current document, anything else is joined with the
 //! current document's URI and retrieved.
 //!
-//! External documents are loaded up front (a scan for `$ref`s), so the walk can hand
-//! out plain references with stable addresses. A node's address is its identity,
+//! External documents are retrieved when a `$ref` to them is first followed, as
+//! upstream's registry does, and kept for the rest of the validation, so the walk can
+//! hand out plain references with stable addresses. A node's address is its identity,
 //! like Python's `id()`, which upstream uses to deduplicate schema visits.
 
+use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
 
 use percent_encoding::percent_decode_str;
@@ -18,6 +20,7 @@ use url::Url;
 
 use crate::loader;
 use crate::pyrepr;
+use crate::retrieve::Retrieve;
 use crate::version::python_type_name;
 
 /// A non-validation failure that upstream surfaces as an exception (exit status 2).
@@ -103,30 +106,38 @@ impl<'d> Node<'d> {
 
 struct External {
     uri: String,
+    /// The parsed document, or why it could not be retrieved (diagnostic only: upstream
+    /// reports every retrieval failure as `Unresolvable(ref)`).
     value: Result<Value, String>,
 }
 
-/// The root document plus every external document reachable through `$ref`.
+/// The root document plus the external documents its `$ref`s have led to so far.
 pub(crate) struct Documents<'a> {
     root: &'a Value,
     root_uri: String,
-    externals: Vec<External>,
-    by_uri: HashMap<String, usize>,
+    /// Fetches `http(s)://` documents; `None` leaves such references unresolvable.
+    retriever: Option<&'a dyn Retrieve>,
+    /// External documents in the order they were first needed. Failures are kept too:
+    /// upstream never retries, as an unresolvable reference ends the validation.
+    externals: Arena<External>,
+    /// Document index by URI (without fragment): 0 is the root, `n` is `externals[n - 1]`.
+    by_uri: RefCell<HashMap<String, usize>>,
 }
 
 impl<'a> Documents<'a> {
-    /// Wraps `root`, whose location is `base_uri` (a `file://` URI, or empty), and
-    /// loads the external documents its `$ref`s point to.
-    pub fn new(root: &'a Value, base_uri: &str) -> Self {
-        let mut docs = Self {
+    /// Wraps `root`, whose location is `base_uri` (a `file://` or `http(s)://` URI, or
+    /// empty). External documents are read or fetched (through `retriever`) when a
+    /// `$ref` to them is first resolved.
+    pub fn new(root: &'a Value, base_uri: &str, retriever: Option<&'a dyn Retrieve>) -> Self {
+        let root_uri = strip_fragment(base_uri).to_owned();
+        let by_uri = HashMap::from([(root_uri.clone(), 0)]);
+        Self {
             root,
-            root_uri: strip_fragment(base_uri).to_owned(),
-            externals: Vec::new(),
-            by_uri: HashMap::new(),
-        };
-        docs.by_uri.insert(docs.root_uri.clone(), 0);
-        docs.load_externals();
-        docs
+            root_uri,
+            retriever,
+            externals: Arena::new(),
+            by_uri: RefCell::new(by_uri),
+        }
     }
 
     pub fn root(&self) -> Node<'_> {
@@ -141,7 +152,7 @@ impl<'a> Documents<'a> {
         if doc == 0 {
             &self.root_uri
         } else {
-            &self.externals[doc - 1].uri
+            &self.externals.get(doc - 1).uri
         }
     }
 
@@ -163,7 +174,7 @@ impl<'a> Documents<'a> {
                 (uri.to_owned(), fragment.to_owned())
             }
         };
-        let doc = *self.by_uri.get(&uri).ok_or_else(unresolvable)?;
+        let doc = self.document_index(&uri);
         // A document that could not be read or parsed is `Unretrievable`, which
         // `referencing` reports as `Unresolvable(ref)`.
         let contents = self.document(doc).ok_or_else(unresolvable)?;
@@ -185,37 +196,52 @@ impl<'a> Documents<'a> {
         if doc == 0 {
             return Some(self.root);
         }
-        self.externals[doc - 1].value.as_ref().ok()
+        self.externals.get(doc - 1).value.as_ref().ok()
     }
 
-    fn load_externals(&mut self) {
-        let mut pending = vec![0];
-        while let Some(doc) = pending.pop() {
-            let mut refs = Vec::new();
-            if let Some(value) = self.document(doc) {
-                collect_refs(value, &mut refs);
-            }
-            let base = self.uri(doc).to_owned();
-            for reference in refs {
-                if reference.starts_with('#') {
-                    continue;
+    /// The index of the document at `uri`, retrieving it on first use like
+    /// `Registry.get_or_retrieve`.
+    fn document_index(&self, uri: &str) -> usize {
+        if let Some(&doc) = self.by_uri.borrow().get(uri) {
+            return doc;
+        }
+        // Retrieval runs a `Retrieve` implementation; no borrow is held meanwhile.
+        let value = self.retrieve(uri);
+        let doc = self.externals.push(External {
+            uri: uri.to_owned(),
+            value,
+        }) + 1;
+        self.by_uri.borrow_mut().insert(uri.to_owned(), doc);
+        doc
+    }
+
+    /// Reads or fetches the document at `uri` the way upstream's default handlers do.
+    fn retrieve(&self, uri: &str) -> Result<Value, String> {
+        let url = Url::parse(uri).map_err(|error| error.to_string())?;
+        match url.scheme() {
+            "file" => {
+                // urllib opens the URL's whole selector, query included, as the file name.
+                if url.query().is_some() {
+                    return Err(format!("not a file path: {uri}"));
                 }
-                let Some(uri) = join_uri(&base, &reference) else {
-                    continue;
-                };
-                let uri = strip_fragment(&uri).to_owned();
-                if self.by_uri.contains_key(&uri) {
-                    continue;
-                }
-                let value = retrieve(&uri, &reference);
-                self.externals.push(External {
-                    uri: uri.clone(),
-                    value,
-                });
-                let index = self.externals.len();
-                self.by_uri.insert(uri, index);
-                pending.push(index);
+                let path = url
+                    .to_file_path()
+                    .map_err(|()| format!("not a file path: {uri}"))?;
+                let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                // Upstream reads files through `urlopen`, which is the stream name
+                // PyYAML reports.
+                loader::load(&bytes, "<urllib response>").map_err(|error| error.message)
             }
+            "http" | "https" => {
+                let retriever = self
+                    .retriever
+                    .ok_or_else(|| "remote references are not retrieved".to_owned())?;
+                let bytes = retriever.retrieve(uri).map_err(|error| error.message)?;
+                // An HTTP response has no name for PyYAML to report.
+                loader::load(&bytes, "<file>").map_err(|error| error.message)
+            }
+            // jsonschema-path's handlers accept nothing else.
+            scheme => Err(format!("Scheme {scheme} not allowed")),
         }
     }
 
@@ -420,35 +446,36 @@ fn python_int(s: &str) -> Option<i128> {
     Some(if negative { -value } else { value })
 }
 
-/// Every string that may be resolved as a reference: `$ref`s, and discriminator mapping
-/// values, which OpenAPI 3.0 default validation follows.
-fn collect_refs(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::String(reference)) = map.get("$ref") {
-                out.push(reference.clone());
-            }
-            if let Some(Value::Object(mapping)) = map
-                .get("discriminator")
-                .and_then(|discriminator| discriminator.get("mapping"))
-            {
-                out.extend(
-                    mapping
-                        .values()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned),
-                );
-            }
-            for child in map.values() {
-                collect_refs(child, out);
-            }
+/// Append-only storage whose elements never move: a reference to an element stays valid
+/// for as long as the arena does, even as elements are added through a shared reference.
+/// [`Documents`] hands out [`Node`]s into documents retrieved while the walk is under way,
+/// as upstream's registry grows while references are resolved.
+struct Arena<T> {
+    items: UnsafeCell<Vec<Box<T>>>,
+}
+
+impl<T> Arena<T> {
+    fn new() -> Self {
+        Self {
+            items: UnsafeCell::new(Vec::new()),
         }
-        Value::Array(items) => {
-            for child in items {
-                collect_refs(child, out);
-            }
-        }
-        _ => {}
+    }
+
+    /// Appends `item` and returns its index.
+    fn push(&self, item: T) -> usize {
+        // SAFETY: the vector is only accessed here and in `get`, each for the duration
+        // of the call and without calling back into the arena, and `UnsafeCell` makes
+        // the arena `!Sync`, so no two accesses overlap. Elements are boxed and never
+        // removed, so references returned by `get` survive the vector growing.
+        let items = unsafe { &mut *self.items.get() };
+        items.push(Box::new(item));
+        items.len() - 1
+    }
+
+    fn get(&self, index: usize) -> &T {
+        // SAFETY: see `push`.
+        let items = unsafe { &*self.items.get() };
+        &items[index]
     }
 }
 
@@ -468,23 +495,6 @@ fn join_uri(base: &str, reference: &str) -> Option<String> {
         .map(|url| url.to_string())
 }
 
-/// Retrieves an external document the way upstream's default handlers would.
-fn retrieve(uri: &str, reference: &str) -> Result<Value, String> {
-    let unresolvable = || reference.to_owned();
-    let url = Url::parse(uri).map_err(|_| unresolvable())?;
-    if url.scheme() != "file" {
-        // Upstream fetches http(s) references over the network; this port does not.
-        return Err(unresolvable());
-    }
-    // urllib opens the URL's whole selector, query included, as the file name.
-    if url.query().is_some() {
-        return Err(unresolvable());
-    }
-    let path = url.to_file_path().map_err(|()| unresolvable())?;
-    let bytes = std::fs::read(&path).map_err(|_| unresolvable())?;
-    loader::load(&bytes, "<urllib response>").map_err(|error| error.message)
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -498,7 +508,7 @@ mod tests {
             "b": {"$ref": "#/c/0"},
             "c": [{"type": "string"}],
         });
-        let docs = Documents::new(&spec, "");
+        let docs = Documents::new(&spec, "", None);
         let a = docs.child(docs.root(), "a").unwrap();
         assert_eq!(a.value, &json!({"type": "string"}));
         assert_eq!(
@@ -515,14 +525,14 @@ mod tests {
             "paths": {"/pets/{id}": {"get": {}}},
             "x": {"$ref": "#/paths/~1pets~1%7Bid%7D/get"},
         });
-        let docs = Documents::new(&spec, "");
+        let docs = Documents::new(&spec, "", None);
         assert_eq!(docs.child(docs.root(), "x").unwrap().value, &json!({}));
     }
 
     #[test]
     fn missing_targets_crash_like_upstream() {
         let spec = json!({"a": {"$ref": "#/nope"}});
-        let docs = Documents::new(&spec, "");
+        let docs = Documents::new(&spec, "", None);
         let Crash(message) = docs.child(docs.root(), "a").unwrap_err();
         assert_eq!(
             message,
@@ -533,7 +543,7 @@ mod tests {
     #[test]
     fn ref_cycles_hit_the_recursion_limit() {
         let spec = json!({"a": {"$ref": "#/b"}, "b": {"$ref": "#/a"}});
-        let docs = Documents::new(&spec, "");
+        let docs = Documents::new(&spec, "", None);
         assert_eq!(
             docs.child(docs.root(), "a").unwrap_err(),
             Crash::recursion()
@@ -543,7 +553,7 @@ mod tests {
     #[test]
     fn non_string_refs_are_plain_mappings() {
         let spec = json!({"a": {"$ref": 5}});
-        let docs = Documents::new(&spec, "");
+        let docs = Documents::new(&spec, "", None);
         assert_eq!(
             docs.child(docs.root(), "a").unwrap().value,
             &json!({"$ref": 5})

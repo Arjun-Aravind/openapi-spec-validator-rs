@@ -11,7 +11,7 @@ from typing import Any, Final
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from openapi_spec_validator_rs import _core
+from openapi_spec_validator_rs import _core, handlers
 from openapi_spec_validator_rs.exceptions import (
     OpenAPIVersionNotFound,
     ValidatorDetectError,
@@ -180,6 +180,8 @@ def _validate_bytes(
     version = None
     if cls is not None:
         version = f"{cls.spec_version.major}.{cls.spec_version.minor}"
-    errors = _core.validate_bytes(data, stream_name, base_uri, version, False)
+    errors = _core.validate_bytes(
+        data, stream_name, base_uri, version, False, handlers.retrieve
+    )
     if errors:
         raise _from_core(errors[0])

@@ -18,6 +18,11 @@ name = "openapi_spec_validator_rs_cli"
 name = "openapi-spec-validator-rs"
 path = "src/main.rs"
 
+[features]
+default = ["http"]
+# Fetch `http(s)://` `$ref` targets with the library's built-in client.
+http = ["openapi-spec-validator-rs/http"]
+
 [dependencies]
 clap.workspace = true
 mimalloc.workspace = true

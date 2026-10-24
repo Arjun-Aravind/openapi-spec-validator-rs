@@ -2,7 +2,8 @@ name: Wheels
 
 # Builds and smoke-tests the wheels and the sdist on every push and pull request.
 #
-# Releasing: bump `version` in Cargo.toml, add the section to CHANGELOG.md, commit, then
+# Releasing: bump `version` in Cargo.toml (under [workspace.package] and for the two
+# crates under [workspace.dependencies]), add the section to CHANGELOG.md, commit, then
 # tag and push the tag:
 #
 #     git tag -a v0.2.0 -m "openapi-spec-validator-rs 0.2.0" && git push origin v0.2.0
@@ -150,8 +151,12 @@ jobs:
           from pathlib import Path
 
           tag = os.environ["RELEASE_TAG"]
-          version = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          workspace = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]
+          version = workspace["package"]["version"]
           assert tag == f"v{version}", f"tag {tag} does not match Cargo.toml version {version}"
+          for crate in ("openapi-spec-validator-rs", "openapi-spec-validator-rs-cli"):
+              required = workspace["dependencies"][crate]["version"]
+              assert required == version, f"[workspace.dependencies] {crate} requires {required}, not {version}"
           changelog = Path("CHANGELOG.md").read_text()
           heading = re.compile(r"^## \[?" + re.escape(version) + r"\]?(?=\s|$).*$", re.MULTILINE)
           match = heading.search(changelog)
