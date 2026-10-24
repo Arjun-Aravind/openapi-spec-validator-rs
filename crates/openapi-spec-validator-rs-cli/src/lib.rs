@@ -229,6 +229,10 @@ fn stdin_errors() -> TextErrors {
     if env("PYTHONUTF8").as_deref() == Some("1") {
         return TextErrors::SurrogateEscape;
     }
+    // Windows has no C locale: Python decodes stdin strictly there.
+    if cfg!(windows) {
+        return TextErrors::Strict;
+    }
     let locale = env("LC_ALL")
         .or_else(|| env("LC_CTYPE"))
         .or_else(|| env("LANG"))
