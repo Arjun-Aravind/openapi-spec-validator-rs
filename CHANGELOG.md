@@ -19,6 +19,13 @@ All notable changes to this project are documented here. The format follows
   store and reads proxies from the environment. See COMPATIBILITY.md for the details.
 - The `Retrieve` trait and `Options::retriever` in the library crate: how remote
   documents are fetched, or `None` to leave such references unresolvable.
+- Wheels for musl-based Linux (Alpine), x86_64 and aarch64.
+
+### Fixed
+
+- A malformed version in a document read from a file or URL raised a `TypeError` worded
+  as CPython 3.12 words it on every interpreter; it is now the running interpreter's
+  own wording, as for documents passed as objects and as upstream's.
 
 ### Changed
 
