@@ -131,8 +131,10 @@ repos:
         files: .*(openapi|swagger).*\.(json|yaml|yml)$
 ```
 
-The repository also ships a `.pre-commit-hooks.yaml` with the same hook, so it can be
-referenced by its Git URL and a `rev` instead. Adjust `files:` to match your spec files.
+Adjust `files:` to match your spec files. The repository also ships a
+`.pre-commit-hooks.yaml`, so the hook can be referenced by its Git URL and a `rev`
+instead, but pre-commit then builds the package from source, which needs a Rust
+toolchain on every machine that runs it; the form above installs the prebuilt wheel.
 
 ## Benchmarks
 
@@ -151,7 +153,7 @@ It also needs about a quarter of the memory on JSON specs: 80 MiB instead of 290
 GitHub's.
 
 Validating every spec in the APIs.guru directory that openapi-spec-validator accepts (3,646
-files, 640 MB of YAML) takes 2.0 s instead of 202–332 s.
+files, 535 MB of YAML) takes 2.0 s instead of 202–332 s.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for the method, every measurement and how to reproduce
 them.

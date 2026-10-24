@@ -39,8 +39,8 @@ validating FastAPI's `app.openapi()` in a test:
 
 ## Whole corpus
 
-All 3,646 APIs.guru specs that both of openapi-spec-validator's backends accept (about
-640 MB of YAML, Swagger 2.0 to OpenAPI 3.1), passed to one process per tool. Both CLIs stop
+All 3,646 APIs.guru specs that both of openapi-spec-validator's backends accept (535 MB
+of YAML, Swagger 2.0 to OpenAPI 3.1), passed to one process per tool. Both CLIs stop
 at the first invalid file, so the rejected specs are left out. One run each:
 
 | Tool | Time | |

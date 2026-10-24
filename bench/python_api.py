@@ -57,11 +57,18 @@ def main():
     for name, rs, up_rs, up_py in rows:
         print(f"| {name} | {rs * 1000:.0f} ms | {up_rs:.2f} s ({up_rs / rs:.0f}×) "
               f"| {up_py:.2f} s ({up_py / rs:.0f}×) |")
-    json.dump(
-        [dict(spec=n, rs=a, upstream_jsonschema_rs=b, upstream_default=c) for n, a, b, c in rows],
-        open(os.path.join(os.path.dirname(__file__), "results", "python-api.json"), "w"),
-        indent=2,
-    )
+    # Named after the specs measured, so a partial run does not replace a full one.
+    stems = "-".join(os.path.splitext(name)[0] for name, *_ in rows)
+    output = os.path.join(os.path.dirname(__file__), "results", f"python-api-{stems}.json")
+    with open(output, "w") as fh:
+        json.dump(
+            [
+                dict(spec=n, rs=a, upstream_jsonschema_rs=b, upstream_default=c)
+                for n, a, b, c in rows
+            ],
+            fh,
+            indent=2,
+        )
 
 
 if __name__ == "__main__":
