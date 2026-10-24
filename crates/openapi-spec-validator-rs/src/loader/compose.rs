@@ -44,12 +44,24 @@ enum Frame {
     Map(NodeId, Option<NodeId>),
 }
 
+/// An open container, with what the depth limit needs to know about it.
+struct Open {
+    frame: Frame,
+    /// Whether the encoder sees it as a level of nesting: a mapping that is the value
+    /// of a merge key (`<<`), or a mapping in a sequence that is, is flattened into its
+    /// parent by `SafeConstructor.flatten_mapping` before encoding.
+    counted: bool,
+    /// A sequence that is the value of a merge key: its mappings are flattened too.
+    merge_list: bool,
+}
+
 /// Composes the single document of the stream, failing like PyYAML on extra documents.
 ///
-/// Composition stops as soon as containers nest more than `depth_limit` deep, with the
-/// error the JSON round trip would raise for that depth. Upstream reads the whole file
-/// first, but libyaml's scanner slows quadratically with the nesting of mappings
-/// (100,000 levels take 25 seconds), so a document that deep is not scanned to the end.
+/// Composition stops as soon as containers nest more than `depth_limit` deep, counted as
+/// the JSON encoder counts them once merge keys are flattened, with the error the round
+/// trip would raise for that depth. Upstream reads the whole file first, but libyaml's
+/// scanner slows quadratically with the nesting of mappings (100,000 levels take 25
+/// seconds), so a document that deep is not scanned to the end.
 pub(super) fn compose(
     parser: &mut Parser<'_>,
     name: &str,
@@ -89,17 +101,43 @@ fn compose_node_tree(
     depth_limit: usize,
 ) -> Result<NodeId, String> {
     let mut anchors: HashMap<String, NodeId> = HashMap::new();
-    let mut stack: Vec<Frame> = Vec::new();
+    let mut stack: Vec<Open> = Vec::new();
+    // How many of the open containers the encoder counts.
+    let mut depth = 0;
     loop {
         let (event, mark) = parser.next()?;
-        // A container `stack.len()` containers deep is refused by the encoder when that
-        // exceeds the limit (`dump::Encoder::open`); the same check, as early as possible.
+        let mut counted = false;
+        let mut merge_list = false;
         if matches!(
             event,
             Event::SequenceStart { .. } | Event::MappingStart { .. }
-        ) && stack.len() + 1 > depth_limit
-        {
-            return Err(RECURSION.to_owned());
+        ) {
+            let merge_value = match stack.last() {
+                Some(Open {
+                    frame: Frame::Map(_, Some(key)),
+                    ..
+                }) => matches!(out.nodes[*key as usize].tag, Tag::Merge),
+                _ => false,
+            };
+            let in_merge_list = matches!(event, Event::MappingStart { .. })
+                && matches!(
+                    stack.last(),
+                    Some(Open {
+                        merge_list: true,
+                        ..
+                    })
+                );
+            counted = !(merge_value || in_merge_list);
+            merge_list = merge_value && matches!(event, Event::SequenceStart { .. });
+            // A container `depth` counted containers deep is refused by the encoder when
+            // that exceeds the limit (`dump::Encoder::open`); the same check, as early
+            // as possible.
+            if counted {
+                if depth + 1 > depth_limit {
+                    return Err(RECURSION.to_owned());
+                }
+                depth += 1;
+            }
         }
         let finished = match event {
             Event::Alias { anchor } => match anchors.get(&anchor) {
@@ -142,7 +180,11 @@ fn compose_node_tree(
                 if let Some(anchor) = anchor {
                     anchors.insert(anchor, id);
                 }
-                stack.push(Frame::Seq(id));
+                stack.push(Open {
+                    frame: Frame::Seq(id),
+                    counted,
+                    merge_list,
+                });
                 continue;
             }
             Event::MappingStart { anchor, tag } => {
@@ -152,18 +194,31 @@ fn compose_node_tree(
                 if let Some(anchor) = anchor {
                     anchors.insert(anchor, id);
                 }
-                stack.push(Frame::Map(id, None));
+                stack.push(Open {
+                    frame: Frame::Map(id, None),
+                    counted,
+                    merge_list,
+                });
                 continue;
             }
             Event::SequenceEnd | Event::MappingEnd => match stack.pop() {
-                Some(Frame::Seq(id) | Frame::Map(id, _)) => id,
+                Some(Open {
+                    frame: Frame::Seq(id) | Frame::Map(id, _),
+                    counted,
+                    ..
+                }) => {
+                    if counted {
+                        depth -= 1;
+                    }
+                    id
+                }
                 None => return Err(String::from("unbalanced YAML event stream")),
             },
             Event::StreamStart | Event::StreamEnd | Event::DocumentStart | Event::DocumentEnd => {
                 return Err(String::from("unexpected YAML event"));
             }
         };
-        match stack.last_mut() {
+        match stack.last_mut().map(|open| &mut open.frame) {
             None => return Ok(finished),
             Some(Frame::Seq(seq)) => {
                 if let NodeKind::Sequence(items) = &mut out.nodes[*seq as usize].kind {
