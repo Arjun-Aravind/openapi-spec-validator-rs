@@ -11,19 +11,19 @@ parsing:
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend | vacuum (validation rules) |
 |---|---:|---:|---:|---:|
-| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | **55 ms ± 2** | 6.43 s ± 0.03 (116× slower) | 8.24 s ± 0.02 (149× slower) | 1.08 s ± 0.01 (20× slower) |
-| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **149 ms ± 1** | 6.46 s ± 0.01 (43× slower) | 8.22 s ± 0.04 (55× slower) | 1.28 s ± 0.02 (9× slower) |
-| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **30 ms ± 0** | 1.79 s ± 0.01 (59× slower) | 2.83 s ± 0.02 (93× slower) | 679 ms ± 9 (22× slower) |
-| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **19 ms ± 0** | 761 ms ± 4 (41× slower) | 2.13 s ± 0.01 (114× slower) | 244 ms ± 3 (13× slower) |
+| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | **57 ms ± 1** | 6.41 s ± 0.02 (113× slower) | 8.18 s ± 0.03 (144× slower) | 1.10 s ± 0.02 (19× slower) |
+| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **152 ms ± 3** | 6.45 s ± 0.02 (42× slower) | 8.20 s ± 0.02 (54× slower) | 1.28 s ± 0.01 (8× slower) |
+| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **31 ms ± 0** | 1.80 s ± 0.01 (59× slower) | 2.82 s ± 0.01 (92× slower) | 692 ms ± 9 (23× slower) |
+| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **20 ms ± 0** | 762 ms ± 4 (39× slower) | 2.13 s ± 0.01 (109× slower) | 247 ms ± 4 (13× slower) |
 
 Peak memory (resident set):
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend | vacuum (validation rules) |
 |---|---:|---:|---:|---:|
-| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | 80 MiB | 291 MiB | 289 MiB | 1386 MiB |
-| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | 130 MiB | 292 MiB | 289 MiB | 1442 MiB |
-| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | 48 MiB | 184 MiB | 181 MiB | 856 MiB |
-| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | 31 MiB | 122 MiB | 120 MiB | 324 MiB |
+| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | 81 MiB | 291 MiB | 289 MiB | 1399 MiB |
+| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | 132 MiB | 292 MiB | 289 MiB | 1434 MiB |
+| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | 49 MiB | 184 MiB | 181 MiB | 857 MiB |
+| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | 31 MiB | 122 MiB | 120 MiB | 325 MiB |
 
 ## Python API
 
@@ -33,22 +33,23 @@ validating FastAPI's `app.openapi()` in a test:
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend |
 |---|---:|---:|---:|
-| GitHub (13.5 MB) | **31 ms** | 4.65 s (149× slower) | 6.43 s (205× slower) |
-| Stripe (8.3 MB) | **16 ms** | 0.89 s (57× slower) | 1.94 s (123× slower) |
-| Kubernetes (4.3 MB) | **11 ms** | 0.33 s (30× slower) | 1.71 s (155× slower) |
+| GitHub (13.5 MB) | **33 ms** | 4.67 s (143× slower) | 6.38 s (196× slower) |
+| Stripe (8.3 MB) | **16 ms** | 0.89 s (55× slower) | 1.91 s (119× slower) |
+| Kubernetes (4.3 MB) | **11 ms** | 0.33 s (29× slower) | 1.70 s (149× slower) |
 
 ## Whole corpus
 
 All 3,646 APIs.guru specs that both of openapi-spec-validator's backends accept (535 MB
 of YAML, Swagger 2.0 to OpenAPI 3.1), passed to one process per tool. Both CLIs stop
-at the first invalid file, so the rejected specs are left out. One run each:
+at the first invalid file, so the rejected specs are left out. openapi-spec-validator-rs:
+mean of 3 runs after a warm-up; openapi-spec-validator: one run each:
 
 | Tool | Time | |
 |---|---:|---|
-| openapi-spec-validator-rs (10 threads) | **2.0 s** | |
-| openapi-spec-validator-rs (1 thread) | 7.5 s | |
-| openapi-spec-validator, jsonschema-rs backend | 202 s | 100× slower (27× single-threaded) |
-| openapi-spec-validator, default backend | 332 s | 165× slower (44× single-threaded) |
+| openapi-spec-validator-rs (10 threads) | **1.6 s** | |
+| openapi-spec-validator-rs (1 thread) | 8.0 s | |
+| openapi-spec-validator, jsonschema-rs backend | 202 s | 126× slower (25× single-threaded) |
+| openapi-spec-validator, default backend | 332 s | 207× slower (42× single-threaded) |
 
 openapi-spec-validator validates files one after another; openapi-spec-validator-rs
 validates them in parallel and reports them in order.
