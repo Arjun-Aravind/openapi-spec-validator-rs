@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format follows
   upstream, instead of all being read before validation starts; references inside
   examples and extensions are no longer read at all.
 - `openapi_spec_validator_rs_cli::run_with_stdin` takes the retriever to use.
+- Reading stops as soon as a document nests deeper than the 9,989 containers upstream's
+  JSON round trip accepts, with the same error as before, instead of scanning the whole
+  file first: a file of 100,000 nested mappings took 25 seconds (libyaml's scanner slows
+  quadratically with nesting) and now fails in well under a second.
 
 ## [0.1.0] - 2026-10-24
 

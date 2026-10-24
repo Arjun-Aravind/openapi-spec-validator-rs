@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::dump::RECURSION;
 use super::libyaml::{Event, Parser};
 use super::pyfmt::{Mark, marked_error};
 use super::resolve::{Tag, resolve_scalar};
@@ -44,7 +45,16 @@ enum Frame {
 }
 
 /// Composes the single document of the stream, failing like PyYAML on extra documents.
-pub(super) fn compose(parser: &mut Parser<'_>, name: &str) -> Result<Composed, String> {
+///
+/// Composition stops as soon as containers nest more than `depth_limit` deep, with the
+/// error the JSON round trip would raise for that depth. Upstream reads the whole file
+/// first, but libyaml's scanner slows quadratically with the nesting of mappings
+/// (100,000 levels take 25 seconds), so a document that deep is not scanned to the end.
+pub(super) fn compose(
+    parser: &mut Parser<'_>,
+    name: &str,
+    depth_limit: usize,
+) -> Result<Composed, String> {
     let mut composed = Composed {
         nodes: Vec::new(),
         root: None,
@@ -56,7 +66,7 @@ pub(super) fn compose(parser: &mut Parser<'_>, name: &str) -> Result<Composed, S
         return Ok(composed);
     }
     // DOCUMENT-START was just consumed.
-    let root = compose_node_tree(parser, name, &mut composed)?;
+    let root = compose_node_tree(parser, name, &mut composed, depth_limit)?;
     composed.root = Some(root);
     parser.next()?; // DOCUMENT-END
     let (event, mark) = parser.next()?;
@@ -76,11 +86,21 @@ fn compose_node_tree(
     parser: &mut Parser<'_>,
     name: &str,
     out: &mut Composed,
+    depth_limit: usize,
 ) -> Result<NodeId, String> {
     let mut anchors: HashMap<String, NodeId> = HashMap::new();
     let mut stack: Vec<Frame> = Vec::new();
     loop {
         let (event, mark) = parser.next()?;
+        // A container `stack.len()` containers deep is refused by the encoder when that
+        // exceeds the limit (`dump::Encoder::open`); the same check, as early as possible.
+        if matches!(
+            event,
+            Event::SequenceStart { .. } | Event::MappingStart { .. }
+        ) && stack.len() + 1 > depth_limit
+        {
+            return Err(RECURSION.to_owned());
+        }
         let finished = match event {
             Event::Alias { anchor } => match anchors.get(&anchor) {
                 Some(&id) => {

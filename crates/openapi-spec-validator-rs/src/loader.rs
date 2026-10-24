@@ -92,7 +92,7 @@ fn load_yaml(
 ) -> Result<Value, LoadError> {
     let run = || -> Result<Value, String> {
         let mut parser = libyaml::Parser::new(source, stream_name);
-        let mut doc = compose::compose(&mut parser, stream_name)?;
+        let mut doc = compose::compose(&mut parser, stream_name, depth_limit)?;
         // PyYAML has finished reading at this point; release the parser's buffers early.
         drop(parser);
         let (graph, root) = construct::construct(&mut doc, stream_name)?;

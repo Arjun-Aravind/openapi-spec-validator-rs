@@ -13,7 +13,7 @@ use super::pyfmt::json_float;
 use super::scalars::INT_TO_STR_LIMIT;
 
 const CIRCULAR: &str = "Circular reference detected";
-const RECURSION: &str = "maximum recursion depth exceeded while encoding a JSON object";
+pub(super) const RECURSION: &str = "maximum recursion depth exceeded while encoding a JSON object";
 
 enum Frame {
     List {
