@@ -1,18 +1,44 @@
 name: Wheels
 
+# Builds and smoke-tests the wheels and the sdist on every push and pull request.
+#
+# Releasing: bump `version` in Cargo.toml, add the section to CHANGELOG.md, commit, then
+# tag and push the tag:
+#
+#     git tag -a v0.2.0 -m "openapi-spec-validator-rs 0.2.0" && git push origin v0.2.0
+#
+# The tagged run also publishes: it creates the GitHub release with the changelog section
+# as notes and the artifacts attached, uploads the wheels and sdist to PyPI (trusted
+# publishing, no token) and publishes the two crates to crates.io (CARGO_REGISTRY_TOKEN
+# secret). An existing tag can be built and published from the latest workflow with
+#
+#     gh workflow run wheels.yml --ref main -f tag=v0.1.0
+#
+# One-time setup: register this repository and workflow as a pending trusted publisher on
+# PyPI (https://pypi.org/manage/account/publishing/: owner Arjun-Aravind, repository
+# openapi-spec-validator-rs, workflow wheels.yml, no environment), and add a crates.io API
+# token with the publish-new and publish-update scopes as the CARGO_REGISTRY_TOKEN secret.
+# Every publish step skips what is already published, so a failed run can be re-run.
+
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v0.1.0); leave empty to build the current branch without publishing"
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  # Never cancel a run that may be publishing.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag == '' }}
 
 jobs:
   wheels:
@@ -39,6 +65,8 @@ jobs:
             target: x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -49,8 +77,9 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: auto
           args: --release --out dist
-          # sccache's MSVC wrapper breaks mimalloc's C build on Windows.
-          sccache: ${{ matrix.runner != 'windows-latest' && !startsWith(github.ref, 'refs/tags/') }}
+          # sccache's MSVC wrapper breaks mimalloc's C build on Windows, and release
+          # builds are made from scratch.
+          sccache: ${{ matrix.runner != 'windows-latest' && !startsWith(github.ref, 'refs/tags/') && inputs.tag == '' }}
       - name: Smoke test the wheel
         shell: bash
         run: |
@@ -68,6 +97,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -92,6 +123,114 @@ jobs:
           path: dist
           if-no-files-found: error
 
-  # Publishing is manual: download the `wheels-*` and `sdist` artifacts of a tagged
-  # run, check them, and upload them with `twine upload` (or `maturin upload`).
-  # There is deliberately no publish job here.
+  release:
+    name: GitHub release and PyPI
+    needs: [wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # PyPI trusted publishing (OIDC); no token stored anywhere.
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check the tag against Cargo.toml and CHANGELOG.md
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          version = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          assert tag == f"v{version}", f"tag {tag} does not match Cargo.toml version {version}"
+          changelog = Path("CHANGELOG.md").read_text()
+          heading = re.compile(r"^## \[?" + re.escape(version) + r"\]?(?=\s|$).*$", re.MULTILINE)
+          match = heading.search(changelog)
+          assert match, f"CHANGELOG.md has no section for {version}"
+          assert "unreleased" not in match.group().lower(), "finalize the changelog section first"
+          notes = re.split(r"^## ", changelog[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
+          # Drop the link-reference definitions at the end of the file, and point links to
+          # files in the repository at the tag, since release notes have no base path.
+          notes = re.sub(r"^\[[^\]]+\]: \S+\s*$", "", notes, flags=re.MULTILINE).strip()
+          repository = os.environ["GITHUB_REPOSITORY"]
+          notes = re.sub(
+              r"\]\(([A-Za-z0-9_./-]+\.md(?:#[^)]*)?)\)",
+              rf"](https://github.com/{repository}/blob/{tag}/\1)",
+              notes,
+          )
+          assert notes, "the changelog section is empty"
+          Path(os.environ["RUNNER_TEMP"], "release_notes.md").write_text(notes + "\n")
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"RELEASE_VERSION={version}\n")
+          PY
+      - name: Collect the artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: Check the artifacts
+        run: |
+          ls -l dist
+          test "$(ls dist | wc -l)" -eq 6
+          test "$(ls dist | grep -c "openapi_spec_validator_rs-${RELEASE_VERSION}[.-]")" -eq 6
+          python -m pip install --quiet twine
+          python -m twine check dist/*
+      - name: Create the GitHub release
+        # 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 = v2 (pinned for supply-chain hygiene)
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: openapi-spec-validator-rs ${{ env.RELEASE_VERSION }}
+          body_path: ${{ runner.temp }}/release_notes.md
+          files: dist/*
+          prerelease: ${{ contains(env.RELEASE_TAG, 'alpha') || contains(env.RELEASE_TAG, 'beta') || contains(env.RELEASE_TAG, 'rc') }}
+      - name: Publish to PyPI (trusted publishing)
+        # 7245906fb61fa33a13554f9d5fb856fe61758086 = release/v1 (pinned for supply-chain hygiene)
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
+        with:
+          packages-dir: dist/
+          # PyPI versions are immutable; skip files already uploaded so that a retried
+          # run (for example after fixing the publisher setup) can complete.
+          skip-existing: true
+
+  crates:
+    name: crates.io
+    needs: [release]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      # The CLI depends on the library crate, so the library goes first; `cargo publish`
+      # waits for it to appear in the index before returning. A version that is already
+      # on crates.io is skipped, so a retried run can complete.
+      - name: Publish the crates
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN secret is not set"; exit 1; }
+          version="${RELEASE_TAG#v}"
+          for crate in openapi-spec-validator-rs openapi-spec-validator-rs-cli; do
+            if curl -sSf -A "openapi-spec-validator-rs release workflow" \
+                 "https://crates.io/api/v1/crates/$crate/$version" > /dev/null 2>&1; then
+              echo "$crate $version is already on crates.io"
+              continue
+            fi
+            cargo publish -p "$crate" --locked
+          done
