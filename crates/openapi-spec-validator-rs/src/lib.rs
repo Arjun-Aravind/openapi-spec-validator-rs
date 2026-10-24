@@ -85,30 +85,97 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     };
     let first_only = options.errors == ErrorMode::First;
 
-    let mut errors = Vec::new();
-    let validator = meta::document_validator(version);
-    if !validator.is_valid(spec) {
-        errors = meta::convert_errors(
-            validator.iter_errors(spec),
-            &meta::document_schemas(version),
-            spec,
-        );
-        if first_only {
-            errors.truncate(1);
-            return Outcome::Invalid(errors);
+    // Upstream checks the whole document against the meta-schema first, then walks it.
+    // The two are independent, so on large documents they run concurrently; the results
+    // are combined in upstream's order.
+    let (document_errors, walk) = if spec_is_large(spec) {
+        std::thread::scope(|scope| {
+            let document = std::thread::Builder::new()
+                .stack_size(META_STACK_SIZE)
+                .spawn_scoped(scope, || document_errors(spec, version));
+            let walk = walk(spec, version, first_only, &options.base_uri);
+            let errors = match document {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(_) => document_errors(spec, version),
+            };
+            (errors, walk)
+        })
+    } else {
+        let errors = document_errors(spec, version);
+        if first_only && !errors.is_empty() {
+            (errors, Ok(Vec::new()))
+        } else {
+            (errors, walk(spec, version, first_only, &options.base_uri))
+        }
+    };
+
+    let mut errors = document_errors;
+    if first_only && !errors.is_empty() {
+        errors.truncate(1);
+        return Outcome::Invalid(errors);
+    }
+    match walk {
+        Err(message) => Outcome::Error(message),
+        Ok(mut walk_errors) => {
+            errors.append(&mut walk_errors);
+            if errors.is_empty() {
+                Outcome::Valid
+            } else {
+                Outcome::Invalid(errors)
+            }
         }
     }
+}
 
-    let docs = Documents::new(spec, &options.base_uri);
-    let mut walker = Walker::new(&docs, version, first_only);
-    if let Err(Stop::Crash(message)) = walker.root(docs.root()) {
-        return Outcome::Error(message);
+/// Stack size for the meta-schema thread: validation recurses with document nesting.
+const META_STACK_SIZE: usize = 256 << 20;
+
+/// Whether a document is big enough for running its two passes concurrently to pay off.
+fn spec_is_large(spec: &Value) -> bool {
+    const THRESHOLD: usize = 512;
+    fn count(value: &Value, budget: &mut usize) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        match value {
+            Value::Object(map) => map.values().for_each(|child| count(child, budget)),
+            Value::Array(items) => items.iter().for_each(|child| count(child, budget)),
+            _ => {}
+        }
     }
-    errors.append(&mut walker.errors);
-    if errors.is_empty() {
-        Outcome::Valid
-    } else {
-        Outcome::Invalid(errors)
+    let mut budget = THRESHOLD;
+    count(spec, &mut budget);
+    budget == 0
+}
+
+/// Errors from validating the whole document against the version's meta-schema.
+fn document_errors(spec: &Value, version: SpecVersion) -> Vec<ValidationError> {
+    let validator = meta::document_validator(version);
+    if validator.is_valid(spec) {
+        return Vec::new();
+    }
+    meta::convert_errors(
+        validator.iter_errors(spec),
+        &meta::document_schemas(version),
+        spec,
+    )
+}
+
+/// Upstream's keyword walk: its errors, or the message of the exception it would raise.
+fn walk(
+    spec: &Value,
+    version: SpecVersion,
+    first_only: bool,
+    base_uri: &str,
+) -> Result<Vec<ValidationError>, String> {
+    let docs = Documents::new(spec, base_uri);
+    let mut walker = Walker::new(&docs, version, first_only);
+    match walker.root(docs.root()) {
+        Err(Stop::Crash(message)) => Err(message),
+        Ok(()) | Err(Stop::Done) => Ok(walker.errors),
     }
 }
 

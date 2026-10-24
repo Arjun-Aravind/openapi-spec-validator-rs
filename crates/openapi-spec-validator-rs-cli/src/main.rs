@@ -1,6 +1,10 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+// Parsing a large spec makes millions of small allocations.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let stdout = io::stdout();
     let stderr = io::stderr();

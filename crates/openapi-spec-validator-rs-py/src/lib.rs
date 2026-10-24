@@ -18,6 +18,10 @@ use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyType;
 
 use crate::convert::{to_python, to_value};
+
+// Converting and parsing large documents makes millions of small allocations.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use crate::errors::CoreError;
 
 /// Where the Python exception classes live (they are plain Python classes so that they

@@ -17,6 +17,9 @@ use openapi_spec_validator_rs::{
 };
 use rayon::prelude::*;
 
+/// Stack size of the validation threads (address space only; pages are committed on use).
+const WORKER_STACK_SIZE: usize = 256 << 20;
+
 /// Validate OpenAPI / Swagger specification files.
 #[derive(Debug, Parser)]
 #[command(name = "openapi-spec-validator-rs", version)]
@@ -117,11 +120,21 @@ fn execute(
         base_uri: String::new(),
     };
 
-    let results: Vec<FileResult> = args
-        .files
-        .par_iter()
-        .map(|file| validate_file(file, &options, stdin))
-        .collect();
+    let validate_all = || -> Vec<FileResult> {
+        args.files
+            .par_iter()
+            .map(|file| validate_file(file, &options, stdin))
+            .collect()
+    };
+    // Loading and validating recurse with the document's nesting, which the loader allows
+    // up to Python's limits; run on threads whose stacks fit that in any build.
+    let results = match rayon::ThreadPoolBuilder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .build()
+    {
+        Ok(pool) => pool.install(validate_all),
+        Err(_) => validate_all(),
+    };
 
     for result in results {
         let FileResult { name, result } = result;
