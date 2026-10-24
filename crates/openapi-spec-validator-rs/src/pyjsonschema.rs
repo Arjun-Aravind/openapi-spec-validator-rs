@@ -1080,7 +1080,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 let Value::Array(items) = instance else {
                     return Ok(());
                 };
-                let evaluated = self.evaluated_items_in(validator, items, schema)?;
+                let evaluated = self.evaluated_items_in(validator, instance, schema)?;
                 let unevaluated: Vec<Value> = items
                     .iter()
                     .enumerate()
@@ -1098,7 +1098,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 let Value::Object(object) = instance else {
                     return Ok(());
                 };
-                let evaluated = self.evaluated_properties_in(validator, object, schema)?;
+                let evaluated = self.evaluated_properties_in(validator, instance, schema)?;
                 let mut unevaluated = Vec::new();
                 for (property, child) in object {
                     if evaluated.contains(property) {
@@ -1262,14 +1262,14 @@ impl<'d> Evaluator<'d, '_, '_> {
     fn evaluated_items(
         &mut self,
         validator: &Validator,
-        items: &[Value],
+        instance: &Value,
         schema: &Value,
     ) -> Result<Vec<usize>, Crash> {
         match schema {
             Value::Bool(_) => Ok(Vec::new()),
             Value::Object(map) => {
                 self.enter(1)?;
-                let evaluated = self.evaluated_items_in(validator, items, map)?;
+                let evaluated = self.evaluated_items_in(validator, instance, map)?;
                 self.leave(1);
                 Ok(evaluated)
             }
@@ -1280,19 +1280,19 @@ impl<'d> Evaluator<'d, '_, '_> {
     fn evaluated_items_in(
         &mut self,
         validator: &Validator,
-        items: &[Value],
+        instance: &Value,
         map: &Map<String, Value>,
     ) -> Result<Vec<usize>, Crash> {
+        let items = instance.as_array().map(Vec::as_slice).unwrap_or_default();
         let legacy = validator.class == Class::Draft201909;
         let all = || (0..items.len()).collect::<Vec<_>>();
         if !legacy && map.contains_key("items") {
             return Ok(all());
         }
-        let instance = Value::Array(items.to_vec());
         let mut evaluated = Vec::new();
         for reference in self.references(map, legacy) {
             let (evolved, target) = self.referenced(validator, &reference)?;
-            evaluated.extend(self.evaluated_items(&evolved, items, target)?);
+            evaluated.extend(self.evaluated_items(&evolved, instance, target)?);
         }
         if legacy {
             if let Some(declared) = map.get("items") {
@@ -1305,13 +1305,13 @@ impl<'d> Evaluator<'d, '_, '_> {
             evaluated.extend(0..py_len(prefix)?);
         }
         if let Some(condition) = map.get("if") {
-            if self.is_valid(validator, condition, &instance)? {
-                evaluated.extend(self.evaluated_items(validator, items, condition)?);
+            if self.is_valid(validator, condition, instance)? {
+                evaluated.extend(self.evaluated_items(validator, instance, condition)?);
                 if let Some(then) = map.get("then") {
-                    evaluated.extend(self.evaluated_items(validator, items, then)?);
+                    evaluated.extend(self.evaluated_items(validator, instance, then)?);
                 }
             } else if let Some(otherwise) = map.get("else") {
-                evaluated.extend(self.evaluated_items(validator, items, otherwise)?);
+                evaluated.extend(self.evaluated_items(validator, instance, otherwise)?);
             }
         }
         for keyword in ["contains", "unevaluatedItems"] {
@@ -1326,8 +1326,8 @@ impl<'d> Evaluator<'d, '_, '_> {
         for keyword in ["allOf", "oneOf", "anyOf"] {
             if let Some(subschemas) = map.get(keyword) {
                 for subschema in py_iter(subschemas)?.iter() {
-                    if self.descends_cleanly(validator, &instance, subschema)? {
-                        evaluated.extend(self.evaluated_items(validator, items, subschema)?);
+                    if self.descends_cleanly(validator, instance, subschema)? {
+                        evaluated.extend(self.evaluated_items(validator, instance, subschema)?);
                     }
                 }
             }
@@ -1339,14 +1339,14 @@ impl<'d> Evaluator<'d, '_, '_> {
     fn evaluated_properties(
         &mut self,
         validator: &Validator,
-        object: &Map<String, Value>,
+        instance: &Value,
         schema: &Value,
     ) -> Result<Vec<String>, Crash> {
         match schema {
             Value::Bool(_) => Ok(Vec::new()),
             Value::Object(map) => {
                 self.enter(1)?;
-                let evaluated = self.evaluated_properties_in(validator, object, map)?;
+                let evaluated = self.evaluated_properties_in(validator, instance, map)?;
                 self.leave(1);
                 Ok(evaluated)
             }
@@ -1357,11 +1357,12 @@ impl<'d> Evaluator<'d, '_, '_> {
     fn evaluated_properties_in(
         &mut self,
         validator: &Validator,
-        object: &Map<String, Value>,
+        instance: &Value,
         map: &Map<String, Value>,
     ) -> Result<Vec<String>, Crash> {
+        let empty = Map::new();
+        let object = instance.as_object().unwrap_or(&empty);
         let legacy = validator.class == Class::Draft201909;
-        let instance = Value::Object(object.clone());
         let present = |properties: &Map<String, Value>| {
             properties
                 .keys()
@@ -1372,7 +1373,7 @@ impl<'d> Evaluator<'d, '_, '_> {
         let mut evaluated = Vec::new();
         for reference in self.references(map, legacy) {
             let (evolved, target) = self.referenced(validator, &reference)?;
-            evaluated.extend(self.evaluated_properties(&evolved, object, target)?);
+            evaluated.extend(self.evaluated_properties(&evolved, instance, target)?);
         }
         if legacy {
             for keyword in [
@@ -1414,27 +1415,28 @@ impl<'d> Evaluator<'d, '_, '_> {
         if let Some(dependent) = map.get("dependentSchemas") {
             for (property, subschema) in py_items(dependent)? {
                 if object.contains_key(property) {
-                    evaluated.extend(self.evaluated_properties(validator, object, subschema)?);
+                    evaluated.extend(self.evaluated_properties(validator, instance, subschema)?);
                 }
             }
         }
         for keyword in ["allOf", "oneOf", "anyOf"] {
             if let Some(subschemas) = map.get(keyword) {
                 for subschema in py_iter(subschemas)?.iter() {
-                    if self.descends_cleanly(validator, &instance, subschema)? {
-                        evaluated.extend(self.evaluated_properties(validator, object, subschema)?);
+                    if self.descends_cleanly(validator, instance, subschema)? {
+                        evaluated
+                            .extend(self.evaluated_properties(validator, instance, subschema)?);
                     }
                 }
             }
         }
         if let Some(condition) = map.get("if") {
-            if self.is_valid(validator, condition, &instance)? {
-                evaluated.extend(self.evaluated_properties(validator, object, condition)?);
+            if self.is_valid(validator, condition, instance)? {
+                evaluated.extend(self.evaluated_properties(validator, instance, condition)?);
                 if let Some(then) = map.get("then") {
-                    evaluated.extend(self.evaluated_properties(validator, object, then)?);
+                    evaluated.extend(self.evaluated_properties(validator, instance, then)?);
                 }
             } else if let Some(otherwise) = map.get("else") {
-                evaluated.extend(self.evaluated_properties(validator, object, otherwise)?);
+                evaluated.extend(self.evaluated_properties(validator, instance, otherwise)?);
             }
         }
         Ok(evaluated)
