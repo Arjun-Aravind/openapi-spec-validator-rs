@@ -553,11 +553,24 @@ fn convert_relative(
         _ => String::new(),
     };
     let parent = &location[..location.len().saturating_sub(1)];
-    let schema = schemas
-        .resources
-        .iter()
-        .filter_map(|resource| subschema(resource.contents, parent))
-        .find(|schema| schema.get(&keyword).is_some());
+    // Several meta-schemas can have the same keyword at the same pointer (every 2020-12
+    // vocabulary has a root `type`): the error's absolute location names the right one.
+    let resource_uri = paths.absolute_keyword_location().map(|uri| {
+        uri.as_str()
+            .split_once('#')
+            .map_or(uri.as_str(), |(base, _)| base)
+    });
+    let candidates = || {
+        schemas.resources.iter().filter_map(|resource| {
+            subschema(resource.contents, parent)
+                .filter(|schema| schema.get(&keyword).is_some())
+                .map(|schema| (resource.uri, schema))
+        })
+    };
+    let schema = candidates()
+        .find(|(uri, _)| resource_uri.is_none_or(|wanted| uri.trim_end_matches('#') == wanted))
+        .or_else(|| candidates().next())
+        .map(|(_, schema)| schema);
     // Draft 4's boolean `exclusiveMinimum`/`exclusiveMaximum` only modify `minimum` /
     // `maximum`, which is the keyword Python reports.
     if let Some(bound) = keyword.strip_prefix("exclusive") {

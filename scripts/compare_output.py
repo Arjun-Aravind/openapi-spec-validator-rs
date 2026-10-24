@@ -34,6 +34,7 @@ CASES = [
     "oas31-malformed-ref-target.yaml",
     "--validation-errors all oas31-malformed-ref-target.yaml",
     "swagger-parameter.yaml",
+    "oas31-nested-schema-error.yaml",
 ]
 
 CLI_DIR = os.path.join(os.path.dirname(__file__), "..", "crates", "openapi-spec-validator-rs-cli")

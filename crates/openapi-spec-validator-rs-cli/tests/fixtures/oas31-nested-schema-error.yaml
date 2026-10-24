@@ -1,0 +1,10 @@
+openapi: 3.1.0
+info:
+  title: A malformed subschema, checked against the 2020-12 dialect
+  version: "1.0"
+paths: {}
+components:
+  schemas:
+    Pet:
+      type: object
+      additionalProperties: 5

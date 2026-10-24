@@ -135,3 +135,8 @@ fn exception_from_a_malformed_keyword() {
 fn best_match_hint_in_python_order() {
     insta::assert_snapshot!(cli(&["swagger-parameter.yaml"]));
 }
+
+#[test]
+fn meta_schema_path_through_dynamic_ref() {
+    insta::assert_snapshot!(cli(&["oas31-nested-schema-error.yaml"]));
+}
