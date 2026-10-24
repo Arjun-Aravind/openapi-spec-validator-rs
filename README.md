@@ -29,7 +29,7 @@ hooks and test suites get the same answers without the wait.
 "Same answers" is checked, not assumed:
 
 - **Every check is ported.** Each keyword validator in openapi-spec-validator's
-  `keywords.py` has a counterpart; [COMPATIBILITY.md](COMPATIBILITY.md) lists them, along
+  `keywords.py` has a counterpart; [COMPATIBILITY.md][compatibility] lists them, along
   with every known difference.
 - **Real-world agreement.** On all 4,138 specs in the [APIs.guru](https://apis.guru)
   directory, the verdict (valid, or which error class) and the first line of output match
@@ -132,13 +132,14 @@ repos:
 ```
 
 Adjust `files:` to match your spec files. The repository also ships a
-`.pre-commit-hooks.yaml`, so the hook can be referenced by its Git URL and a `rev`
-instead, but pre-commit then builds the package from source, which needs a Rust
-toolchain on every machine that runs it; the form above installs the prebuilt wheel.
+`.pre-commit-hooks.yaml`, so the hook can be referenced as
+`repo: https://github.com/Arjun-Aravind/openapi-spec-validator-rs` with a `rev` instead,
+but pre-commit then builds the package from source, which needs a Rust toolchain on every
+machine that runs it; the form above installs the prebuilt wheel.
 
 ## Benchmarks
 
-![Validation time per spec](bench/benchmarks.svg)
+![Validation time per spec][chart]
 
 Calling `validate(spec_dict)` from Python on an already-loaded document (what a test that
 validates FastAPI's `app.openapi()` does), median of 5 runs:
@@ -155,7 +156,7 @@ GitHub's.
 Validating every spec in the APIs.guru directory that openapi-spec-validator accepts (3,646
 files, 535 MB of YAML) takes 1.6 s instead of 202–332 s.
 
-See [BENCHMARKS.md](BENCHMARKS.md) for the method, every measurement and how to reproduce
+See [BENCHMARKS.md][benchmarks] for the method, every measurement and how to reproduce
 them.
 
 ## How it works
@@ -177,11 +178,17 @@ messages, format checks) is reproduced by small modules tested against CPython.
 
 ## Compatibility
 
-See [COMPATIBILITY.md](COMPATIBILITY.md). In short: verdicts match openapi-spec-validator
+See [COMPATIBILITY.md][compatibility]. In short: verdicts match openapi-spec-validator
 0.9.0's default installation. Remote (`http://`) `$ref`s are not fetched, and a handful of
 pathological inputs (schemas nested over 120 levels deep, NaN literals) behave differently.
 
 ## License
 
-Apache-2.0, like openapi-spec-validator, which this project ports. See [LICENSE](LICENSE)
-and [NOTICE](NOTICE).
+Apache-2.0, like openapi-spec-validator, which this project ports. See [LICENSE][license]
+and [NOTICE][notice].
+
+[benchmarks]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/BENCHMARKS.md
+[chart]: https://raw.githubusercontent.com/Arjun-Aravind/openapi-spec-validator-rs/main/bench/benchmarks.svg?sanitize=true
+[compatibility]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/COMPATIBILITY.md
+[license]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/LICENSE
+[notice]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/NOTICE

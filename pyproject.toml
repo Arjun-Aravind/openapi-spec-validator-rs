@@ -23,6 +23,12 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.urls]
+Homepage = "https://github.com/Arjun-Aravind/openapi-spec-validator-rs"
+Repository = "https://github.com/Arjun-Aravind/openapi-spec-validator-rs"
+Issues = "https://github.com/Arjun-Aravind/openapi-spec-validator-rs/issues"
+Changelog = "https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/CHANGELOG.md"
+
 [project.scripts]
 openapi-spec-validator-rs = "openapi_spec_validator_rs.__main__:main"
 
