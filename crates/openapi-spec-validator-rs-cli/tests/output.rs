@@ -111,3 +111,27 @@ fn missing_file() {
 fn deprecated_errors_flag_warns() {
     insta::assert_snapshot!(cli(&["--errors", "all", "valid.yaml"]));
 }
+
+#[test]
+fn oas31_default_values() {
+    insta::assert_snapshot!(cli(&["--validation-errors", "all", "oas31-defaults.yaml"]));
+}
+
+#[test]
+fn first_error_before_an_exception() {
+    insta::assert_snapshot!(cli(&["oas31-malformed-ref-target.yaml"]));
+}
+
+#[test]
+fn exception_from_a_malformed_keyword() {
+    insta::assert_snapshot!(cli(&[
+        "--validation-errors",
+        "all",
+        "oas31-malformed-ref-target.yaml"
+    ]));
+}
+
+#[test]
+fn best_match_hint_in_python_order() {
+    insta::assert_snapshot!(cli(&["swagger-parameter.yaml"]));
+}

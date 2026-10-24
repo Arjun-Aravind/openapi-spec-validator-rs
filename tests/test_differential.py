@@ -84,10 +84,7 @@ def describe(error: Any) -> tuple[Any, ...]:
         list(error.path),
         validator,
         list(error.schema_path),
-        # The order of subschema errors may differ (see COMPATIBILITY.md).
-        sorted(
-            repr((e.message, list(e.path), list(e.schema_path))) for e in error.context
-        ),
+        [(e.message, list(e.path), list(e.schema_path)) for e in error.context],
         text,
     )
 

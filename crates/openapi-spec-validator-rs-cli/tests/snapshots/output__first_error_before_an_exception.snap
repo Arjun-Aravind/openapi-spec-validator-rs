@@ -1,0 +1,14 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"oas31-malformed-ref-target.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/oas31-malformed-ref-target.yaml: Validation Error: 5 is not of type 'string'
+
+Failed validating 'type' in schema['properties']['quantity']:
+    {'type': 'string', 'maximum': 'z'}
+
+On instance['quantity']:
+    5
+----- stderr -----

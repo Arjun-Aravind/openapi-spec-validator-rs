@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::error::{SchemaErrorDetails, ValidationError};
 use crate::formats::{self, FormatOutcome, FormatSet};
-use crate::pyregex;
+use crate::pyregex::{self, PyRegex};
 use crate::pyrepr::{self, PathItem, repr, repr_str};
 use crate::schema_path::{Resource, Search, python_order};
 use crate::version::SpecVersion;
@@ -86,6 +86,24 @@ static PY_DRAFT7: LazyLock<Value> = LazyLock::new(|| {
     schema
 });
 
+/// A copy of `schema` for display, with the private meta-schema URIs given back their
+/// official values.
+fn official_ids(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    if let Value::Object(map) = &mut schema {
+        for key in ["id", "$id"] {
+            if let Some(Value::String(id)) = map.get_mut(key) {
+                if id.as_str() == format!("{DRAFT4_URN}#") {
+                    *id = "http://json-schema.org/draft-04/schema#".to_owned();
+                } else if id == DRAFT7_URN {
+                    *id = "http://json-schema.org/draft-07/schema#".to_owned();
+                }
+            }
+        }
+    }
+    schema
+}
+
 /// Rewrites `$ref`s that start with `from` to start with `to` instead.
 fn redirect_refs(value: &mut Value, from: &str, to: &str) {
     match value {
@@ -145,7 +163,8 @@ pub(crate) fn document_validator(version: SpecVersion) -> &'static Validator {
     VALIDATORS[index].get_or_init(|| {
         let mut options = jsonschema::options()
             .with_registry(&OAS_REGISTRY)
-            .should_validate_formats(false);
+            .should_validate_formats(false)
+            .with_keyword("pattern", py_pattern);
         if matches!(version, SpecVersion::V2_0 | SpecVersion::V3_0) {
             options = options.with_keyword("type", draft4_type);
         }
@@ -234,7 +253,8 @@ pub(crate) fn meta_check_validator(dialect: Dialect, formats: FormatSet) -> &'st
             .with_vocabulary(OAS31_VOCAB_URI)
             .with_vocabulary(OAS32_VOCAB_URI)
             .should_validate_formats(true)
-            .with_keyword("format", python_format(formats));
+            .with_keyword("format", python_format(formats))
+            .with_keyword("pattern", py_pattern);
         options = match dialect {
             Dialect::Draft4 => options
                 .with_draft(jsonschema::Draft::Draft4)
@@ -310,6 +330,46 @@ impl<'i> Keyword<'i> for Draft4Type {
         self.types
             .iter()
             .any(|t| is_draft4_type(instance, t).unwrap_or(false))
+    }
+}
+
+/// `pattern` with Python's `re.search` (the meta-schemas' `\\d` and `$` differ from the
+/// Rust engine's). The bundled patterns all compile.
+struct PyPattern {
+    pattern: String,
+    regex: Option<PyRegex>,
+}
+
+fn py_pattern<'a>(
+    _: &'a Map<String, Value>,
+    value: &'a Value,
+    _: Location,
+) -> Result<Box<dyn for<'i> Keyword<'i>>, jsonschema::ValidationError<'a>> {
+    let pattern = value.as_str().unwrap_or_default().to_owned();
+    let regex = PyRegex::compile(&pattern).ok();
+    Ok(Box::new(PyPattern { pattern, regex }))
+}
+
+impl<'i> Keyword<'i> for PyPattern {
+    fn validate(&self, instance: &'i Value) -> Result<(), jsonschema::ValidationError<'i>> {
+        if self.is_valid(instance) {
+            Ok(())
+        } else {
+            Err(jsonschema::ValidationError::custom(format!(
+                "{} does not match {}",
+                repr(instance),
+                repr_str(&self.pattern)
+            )))
+        }
+    }
+
+    fn is_valid(&self, instance: &'i Value) -> bool {
+        let Value::String(text) = instance else {
+            return true;
+        };
+        self.regex
+            .as_ref()
+            .is_none_or(|regex| regex.search(text).unwrap_or(true))
     }
 }
 
@@ -472,16 +532,23 @@ fn convert_relative(
     parent_instance_path: &[PathItem],
     parent_schema_path: &[PathItem],
 ) -> ValidationError {
+    // jsonschema validates each key against `propertyNames` as an instance of its own,
+    // at the object's path; the crate wraps that error, whose paths are the ones to use.
+    let paths = error;
+    let error = match error.kind() {
+        ValidationErrorKind::PropertyNames { error } => error.as_ref(),
+        _ => error,
+    };
     let mut instance = error.instance().as_ref();
-    let mut location = path_items(error.schema_path());
-    let mut instance_path = instance_path_items(error.instance_path(), instance_root);
+    let mut location = path_items(paths.schema_path());
+    let mut instance_path = instance_path_items(paths.instance_path(), instance_root);
     // jsonschema reports a `false` subschema at its own location; Python's `descend`
     // returns before recording that step, so the error belongs to the keyword that
     // descended, without the member it descended into.
     let false_schema = matches!(error.kind(), ValidationErrorKind::FalseSchema)
         .then(|| false_schema_step(&mut location, &mut instance_path))
         .flatten();
-    let keyword = match location.last() {
+    let mut keyword = match location.last() {
         Some(PathItem::Key(keyword)) => keyword.clone(),
         _ => String::new(),
     };
@@ -491,6 +558,13 @@ fn convert_relative(
         .iter()
         .filter_map(|resource| subschema(resource.contents, parent))
         .find(|schema| schema.get(&keyword).is_some());
+    // Draft 4's boolean `exclusiveMinimum`/`exclusiveMaximum` only modify `minimum` /
+    // `maximum`, which is the keyword Python reports.
+    if let Some(bound) = keyword.strip_prefix("exclusive") {
+        if schema.is_some_and(|s| s.get(&keyword).is_some_and(Value::is_boolean)) {
+            keyword = bound.to_ascii_lowercase();
+        }
+    }
     // 2020-12 `items: false` fails once for the whole array, with its own message.
     let items_false = false_schema.is_some_and(|consumed| consumed)
         && keyword == "items"
@@ -512,24 +586,45 @@ fn convert_relative(
         })
         .unwrap_or_else(|| {
             // Upstream's schema path skips `$ref` hops.
-            path_items(error.evaluation_path())
+            path_items(paths.evaluation_path())
                 .into_iter()
                 .filter(|item| !matches!(item, PathItem::Key(key) if key == "$ref"))
                 .collect()
         });
     let context = match error.kind() {
         ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            // Each subschema's errors, in the order Python's iteration yields them.
             context
                 .iter()
-                .flatten()
-                .map(|child| {
-                    convert_relative(child, schemas, instance_root, &instance_path, &schema_path)
+                .flat_map(|branch| {
+                    let mut keyed: Vec<(Vec<usize>, ValidationError)> = branch
+                        .iter()
+                        .map(|child| {
+                            let converted = convert_relative(
+                                child,
+                                schemas,
+                                instance_root,
+                                &instance_path,
+                                &schema_path,
+                            );
+                            let key = context_order(
+                                schemas,
+                                &converted,
+                                instance_root,
+                                &instance_path,
+                                &schema_path,
+                            );
+                            (key, converted)
+                        })
+                        .collect();
+                    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+                    keyed.into_iter().map(|(_, error)| error)
                 })
                 .collect()
         }
         _ => Vec::new(),
     };
-    let schema = schema.cloned().unwrap_or(Value::Null);
+    let schema = schema.map_or(Value::Null, official_ids);
     let (message, keyword, schema) = if items_false {
         (items_false_message(&schema, instance), keyword, schema)
     } else if false_schema.is_some() {
@@ -549,6 +644,28 @@ fn convert_relative(
             cause: None,
             context,
         },
+    )
+}
+
+/// The `python_order` key of a context error whose paths are relative to its parent's.
+fn context_order(
+    schemas: &Schemas<'_>,
+    error: &ValidationError,
+    instance_root: &Value,
+    parent_instance_path: &[PathItem],
+    parent_schema_path: &[PathItem],
+) -> Vec<usize> {
+    let (Some(details), Some(root)) = (&error.schema_error, schemas.resources.first()) else {
+        return Vec::new();
+    };
+    let schema_path = [parent_schema_path, &details.schema_path].concat();
+    let instance_path = [parent_instance_path, &details.instance_path].concat();
+    python_order(
+        &schemas.resources,
+        root,
+        &schema_path,
+        instance_root,
+        &instance_path,
     )
 }
 
@@ -846,18 +963,36 @@ fn python_message(
         ValidationErrorKind::AnyOf { .. } | ValidationErrorKind::OneOfNotValid { .. } => {
             format!("{inst} is not valid under any of the given schemas")
         }
-        ValidationErrorKind::OneOfMultipleValid { .. } => {
-            format!("{inst} is valid under each of {}", value("oneOf"))
+        ValidationErrorKind::OneOfMultipleValid { context } => {
+            // Python lists the later valid subschemas, then the first one. A subschema
+            // is valid when its branch of the context has no errors.
+            let subschemas = schema
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let mut valid = subschemas
+                .iter()
+                .zip(context)
+                .filter(|(_, branch)| branch.is_empty())
+                .map(|(subschema, _)| repr(subschema));
+            let first = valid.next();
+            let reprs: Vec<String> = valid.chain(first).collect();
+            format!("{inst} is valid under each of {}", reprs.join(", "))
         }
         ValidationErrorKind::Not { schema } => {
             format!("{inst} should not be valid under {}", repr(schema))
         }
         ValidationErrorKind::FalseSchema => format!("False schema does not allow {inst}"),
-        ValidationErrorKind::UnevaluatedProperties { unexpected } => format!(
-            "Unevaluated properties are not allowed ({} {} unexpected)",
-            join_reprs(unexpected.iter().map(String::as_str)),
-            if unexpected.len() == 1 { "was" } else { "were" }
-        ),
+        ValidationErrorKind::UnevaluatedProperties { unexpected } => {
+            let mut extras = unexpected.clone();
+            extras.sort();
+            format!(
+                "Unevaluated properties are not allowed ({} {} unexpected)",
+                join_reprs(extras.iter().map(String::as_str)),
+                if extras.len() == 1 { "was" } else { "were" }
+            )
+        }
         _ => error.to_string(),
     }
 }

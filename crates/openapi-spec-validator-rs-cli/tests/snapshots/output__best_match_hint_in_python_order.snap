@@ -1,0 +1,31 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"swagger-parameter.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/swagger-parameter.yaml: Validation Error: {'name': 'limit', 'in': 'query', 'type': 'object'} is not valid under any of the given schemas
+
+Failed validating 'oneOf' in schema['properties']['paths']['patternProperties']['^/']['properties']['get']['properties']['parameters']['items']:
+    {'oneOf': [{'$ref': '#/definitions/parameter'},
+               {'$ref': '#/definitions/jsonReference'}]}
+
+On instance['paths']['/pets']['get']['parameters'][0]:
+    {'name': 'limit', 'in': 'query', 'type': 'object'}
+
+
+# Probably due to this subschema error
+
+## '$ref' is a required property
+
+Failed validating 'required' in schema[1]:
+    {'type': 'object',
+     'required': ['$ref'],
+     'additionalProperties': False,
+     'properties': {'$ref': {'type': 'string'}}}
+
+On instance:
+    {'name': 'limit', 'in': 'query', 'type': 'object'}
+
+(2 more subschemas errors, use --subschema-errors=all to see them.)
+----- stderr -----

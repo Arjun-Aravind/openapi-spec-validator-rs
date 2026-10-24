@@ -1,0 +1,98 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"--validation-errors\", \"all\", \"oas31-defaults.yaml\"])"
+---
+exit code: 1
+----- stdout -----
+tests/fixtures/oas31-defaults.yaml: Validation Error: [1] 0.3 is not a multiple of 0.1
+
+Failed validating 'multipleOf' in schema:
+    {'type': 'number', 'multipleOf': 0.1, 'default': 0.3}
+
+On instance:
+    0.3
+tests/fixtures/oas31-defaults.yaml: Validation Error: [2] '2020-02-30' is not a 'date'
+
+Failed validating 'format' in schema:
+    {'type': 'string', 'format': 'date', 'default': '2020-02-30'}
+
+On instance:
+    '2020-02-30'
+
+# Cause
+
+day is out of range for month
+tests/fixtures/oas31-defaults.yaml: Validation Error: [3] 'ok' is not of type 'integer'
+
+Failed validating 'type' in schema['properties']['200']:
+    {'type': 'integer'}
+
+On instance['200']:
+    'ok'
+tests/fixtures/oas31-defaults.yaml: Validation Error: [4] Too few items match the given schema (expected at least 2 but only 1 matched)
+
+Failed validating 'minContains' in schema:
+    {'type': 'array',
+     'contains': {'type': 'string'},
+     'minContains': 2,
+     'default': ['a', 1]}
+
+On instance:
+    ['a', 1]
+tests/fixtures/oas31-defaults.yaml: Validation Error: [5] 'city' is a dependency of 'street'
+
+Failed validating 'dependentRequired' in schema:
+    {'type': 'object',
+     'dependentRequired': {'street': ['city']},
+     'propertyNames': {'maxLength': 6},
+     'default': {'street': 'Main St', 'country': 'Nowhere'}}
+
+On instance:
+    {'street': 'Main St', 'country': 'Nowhere'}
+tests/fixtures/oas31-defaults.yaml: Validation Error: [6] 'country' is too long
+
+Failed validating 'maxLength' in schema['propertyNames']:
+    {'maxLength': 6}
+
+On instance:
+    'country'
+tests/fixtures/oas31-defaults.yaml: Validation Error: [7] Unevaluated items are not allowed (1, 2 were unexpected)
+
+Failed validating 'unevaluatedItems' in schema:
+    {'type': 'array',
+     'prefixItems': [{'type': 'string'}],
+     'unevaluatedItems': False,
+     'default': ['a', 1, 2]}
+
+On instance:
+    ['a', 1, 2]
+tests/fixtures/oas31-defaults.yaml: Validation Error: [8] 1 is valid under each of {'type': 'number'}, {'minimum': 0}, {'type': 'integer'}
+
+Failed validating 'oneOf' in schema:
+    {'oneOf': [{'type': 'integer'}, {'type': 'number'}, {'minimum': 0}],
+     'default': 1}
+
+On instance:
+    1
+tests/fixtures/oas31-defaults.yaml: Validation Error: [9] Additional properties are not allowed ('a', 'b' were unexpected)
+
+Failed validating 'additionalProperties' in schema:
+    {'type': 'object',
+     'additionalProperties': False,
+     'default': {'b': 1, 'a': 2}}
+
+On instance:
+    {'b': 1, 'a': 2}
+tests/fixtures/oas31-defaults.yaml: Validation Error: [10] 1 is greater than or equal to the maximum of True
+
+Failed validating 'exclusiveMaximum' in schema:
+    {'$schema': 'http://json-schema.org/draft-04/schema#',
+     'type': 'number',
+     'maximum': 1,
+     'exclusiveMaximum': True,
+     'default': 1}
+
+On instance:
+    1
+tests/fixtures/oas31-defaults.yaml: 10 validation errors found
+----- stderr -----

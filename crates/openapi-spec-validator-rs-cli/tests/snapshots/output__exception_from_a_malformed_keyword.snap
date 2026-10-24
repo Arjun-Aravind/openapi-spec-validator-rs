@@ -1,0 +1,8 @@
+---
+source: crates/openapi-spec-validator-rs-cli/tests/output.rs
+expression: "cli(&[\"--validation-errors\", \"all\", \"oas31-malformed-ref-target.yaml\"])"
+---
+exit code: 2
+----- stdout -----
+tests/fixtures/oas31-malformed-ref-target.yaml: Error: '>' not supported between instances of 'int' and 'str'
+----- stderr -----

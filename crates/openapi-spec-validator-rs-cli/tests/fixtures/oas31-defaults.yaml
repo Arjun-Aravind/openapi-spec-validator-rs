@@ -1,0 +1,61 @@
+openapi: 3.1.0
+info:
+  title: Defaults checked with Python jsonschema's Draft 2020-12 rules
+  version: "1.0"
+paths: {}
+components:
+  schemas:
+    Price:
+      type: number
+      multipleOf: 0.1
+      default: 0.3
+    Day:
+      type: string
+      format: date
+      default: "2020-02-30"
+    Statuses:
+      type: object
+      properties:
+        "200":
+          type: integer
+      default:
+        "200": ok
+    Tags:
+      type: array
+      contains:
+        type: string
+      minContains: 2
+      default: [a, 1]
+    Address:
+      type: object
+      dependentRequired:
+        street: [city]
+      propertyNames:
+        maxLength: 6
+      default:
+        street: Main St
+        country: Nowhere
+    Pair:
+      type: array
+      prefixItems:
+        - type: string
+      unevaluatedItems: false
+      default: [a, 1, 2]
+    Count:
+      oneOf:
+        - type: integer
+        - type: number
+        - minimum: 0
+      default: 1
+    Strict:
+      type: object
+      additionalProperties: false
+      default:
+        b: 1
+        a: 2
+    Legacy:
+      $schema: http://json-schema.org/draft-04/schema#
+      type: number
+      maximum: 1
+      exclusiveMaximum: true
+      default: 1

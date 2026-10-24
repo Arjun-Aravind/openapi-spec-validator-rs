@@ -1,0 +1,16 @@
+openapi: 3.1.0
+info:
+  title: A default reaches a malformed schema before its meta-schema check
+  version: "1.0"
+paths: {}
+components:
+  schemas:
+    Order:
+      properties:
+        quantity:
+          $ref: "#/components/schemas/Quantity"
+      default:
+        quantity: 5
+    Quantity:
+      type: string
+      maximum: z

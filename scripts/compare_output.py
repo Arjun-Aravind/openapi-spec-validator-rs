@@ -30,6 +30,10 @@ CASES = [
     "--schema 3.1 valid.yaml",
     "does-not-exist.yaml",
     "--errors all valid.yaml",
+    "--validation-errors all oas31-defaults.yaml",
+    "oas31-malformed-ref-target.yaml",
+    "--validation-errors all oas31-malformed-ref-target.yaml",
+    "swagger-parameter.yaml",
 ]
 
 CLI_DIR = os.path.join(os.path.dirname(__file__), "..", "crates", "openapi-spec-validator-rs-cli")
