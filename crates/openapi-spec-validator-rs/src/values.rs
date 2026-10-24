@@ -20,6 +20,7 @@ use crate::meta;
 use crate::pyobj::{self, Num, json_equal, num_cmp, truthy};
 use crate::pyregex::{self, PyRegex};
 use crate::pyrepr::{PathItem, repr, repr_float, repr_str};
+use crate::schema_path::Resource;
 use crate::version::{SpecVersion, python_type_name};
 
 /// Upstream recurses in Python; a reference cycle hits the recursion limit.
@@ -113,14 +114,24 @@ impl<'d, 'a> DefaultValidator<'d, 'a> {
             .with_keyword("pattern", py_pattern)
             .build(&reference)
             .map_err(|e| Crash(e.to_string()))?;
-        let mut roots: Vec<&Value> = (0..docs_count(docs))
-            .filter_map(|doc| document_value(docs, doc))
+        let uris: Vec<String> = (0..docs_count(docs))
+            .map(|doc| document_uri(docs, doc))
             .collect();
-        roots.push(&reference);
-        let errors: Vec<ValidationError> = validator
-            .iter_errors(value)
-            .map(|error| meta::convert_error(&error, &roots, value))
-            .collect();
+        let mut resources = vec![Resource {
+            uri: "urn:openapi-spec-validator-rs:default",
+            contents: &reference,
+        }];
+        resources.extend((0..docs_count(docs)).filter_map(|doc| {
+            Some(Resource {
+                uri: &uris[doc],
+                contents: document_value(docs, doc)?,
+            })
+        }));
+        let schemas = meta::Schemas {
+            resources,
+            ref_overrides: false,
+        };
+        let errors = meta::convert_errors(validator.iter_errors(value), &schemas, value);
         if let Some(message) = errors.iter().find_map(meta::crash_message) {
             return Err(Crash(message.to_owned()));
         }
@@ -253,7 +264,12 @@ impl<'i> Keyword<'i> for PyPattern {
 /// An error produced by the OAS 3.0 evaluator, with jsonschema's relative paths.
 struct Oas30Error {
     message: String,
-    keyword: String,
+    /// `None` while unset; jsonschema fills it in at the keyword that reported the error.
+    /// Errors from a `false` schema keep `Some("")`, i.e. `validator=None`.
+    keyword: Option<String>,
+    /// Set for an error from a `false` schema until it leaves the `descend` that met that
+    /// schema: Python's `descend` returns before adding its path segments.
+    bare_false: bool,
     schema_path: VecDeque<PathItem>,
     instance_path: VecDeque<PathItem>,
     schema: Value,
@@ -272,7 +288,7 @@ impl Oas30Error {
         ValidationError::from_schema(
             self.message,
             SchemaErrorDetails {
-                keyword: self.keyword,
+                keyword: self.keyword.unwrap_or_default(),
                 schema_path: self.schema_path.into(),
                 schema: self.schema,
                 instance_path: self.instance_path.into(),
@@ -306,7 +322,8 @@ impl<'d> Oas30<'d, '_, '_> {
             Value::Bool(false) => {
                 errors.push(Oas30Error {
                     message: format!("False schema does not allow {}", repr(instance)),
-                    keyword: String::new(),
+                    keyword: Some(String::new()),
+                    bare_false: true,
                     schema_path: VecDeque::new(),
                     instance_path: VecDeque::new(),
                     schema: schema.clone(),
@@ -332,8 +349,8 @@ impl<'d> Oas30<'d, '_, '_> {
             let start = errors.len();
             self.keyword(keyword, value, instance, map, doc, errors)?;
             for error in &mut errors[start..] {
-                if error.keyword.is_empty() {
-                    error.keyword.clone_from(keyword);
+                if error.keyword.is_none() {
+                    error.keyword = Some(keyword.clone());
                     error.schema = schema.clone();
                     error.instance = instance.clone();
                 }
@@ -360,7 +377,8 @@ impl<'d> Oas30<'d, '_, '_> {
     fn error(message: String) -> Oas30Error {
         Oas30Error {
             message,
-            keyword: String::new(),
+            keyword: None,
+            bare_false: false,
             schema_path: VecDeque::new(),
             instance_path: VecDeque::new(),
             schema: Value::Null,
@@ -570,9 +588,7 @@ impl<'d> Oas30<'d, '_, '_> {
                             for (index, subschema) in subschemas.iter().enumerate() {
                                 let start = errors.len();
                                 self.descend(instance, subschema, doc, errors)?;
-                                for error in &mut errors[start..] {
-                                    error.schema_path.push_front(PathItem::Index(index));
-                                }
+                                prefix(&mut errors[start..], None, Some(PathItem::Index(index)));
                             }
                         }
                         "anyOf" => {
@@ -585,9 +601,7 @@ impl<'d> Oas30<'d, '_, '_> {
                                     matched = true;
                                     break;
                                 }
-                                for error in &mut errs {
-                                    error.schema_path.push_front(PathItem::Index(index));
-                                }
+                                prefix(&mut errs, None, Some(PathItem::Index(index)));
                                 all.extend(errs);
                             }
                             if !matched {
@@ -609,9 +623,7 @@ impl<'d> Oas30<'d, '_, '_> {
                                     first_valid = Some(index);
                                     break;
                                 }
-                                for error in &mut errs {
-                                    error.schema_path.push_front(PathItem::Index(index));
-                                }
+                                prefix(&mut errs, None, Some(PathItem::Index(index)));
                                 all.extend(errs);
                             }
                             match first_valid {
@@ -662,9 +674,7 @@ impl<'d> Oas30<'d, '_, '_> {
                 for (index, item) in items.iter().enumerate() {
                     let start = errors.len();
                     self.descend(item, value, doc, errors)?;
-                    for error in &mut errors[start..] {
-                        error.instance_path.push_front(PathItem::Index(index));
-                    }
+                    prefix(&mut errors[start..], Some(PathItem::Index(index)), None);
                 }
             }
             "properties" => {
@@ -681,14 +691,11 @@ impl<'d> Oas30<'d, '_, '_> {
                     if let Some(child) = object.get(property) {
                         let start = errors.len();
                         self.descend(child, subschema, doc, errors)?;
-                        for error in &mut errors[start..] {
-                            error
-                                .instance_path
-                                .push_front(PathItem::Key(property.clone()));
-                            error
-                                .schema_path
-                                .push_front(PathItem::Key(property.clone()));
-                        }
+                        prefix(
+                            &mut errors[start..],
+                            Some(PathItem::Key(property.clone())),
+                            Some(PathItem::Key(property.clone())),
+                        );
                     }
                 }
             }
@@ -746,11 +753,11 @@ impl<'d> Oas30<'d, '_, '_> {
                     for extra in extras {
                         let start = errors.len();
                         self.descend(&object[extra], value, doc, errors)?;
-                        for error in &mut errors[start..] {
-                            error
-                                .instance_path
-                                .push_front(PathItem::Key(extra.to_owned()));
-                        }
+                        prefix(
+                            &mut errors[start..],
+                            Some(PathItem::Key(extra.to_owned())),
+                            None,
+                        );
                     }
                 } else if value == &Value::Bool(false) {
                     let verb = if extras.len() == 1 { "was" } else { "were" };
@@ -935,6 +942,23 @@ impl<'d> Oas30<'d, '_, '_> {
                 )));
                 Ok(())
             }
+        }
+    }
+}
+
+/// Applies the `path` / `schema_path` arguments of one `descend` call to the errors it
+/// produced, except to errors from a `false` schema met by that very call.
+fn prefix(errors: &mut [Oas30Error], path: Option<PathItem>, schema_path: Option<PathItem>) {
+    for error in errors {
+        if error.bare_false {
+            error.bare_false = false;
+            continue;
+        }
+        if let Some(item) = &path {
+            error.instance_path.push_front(item.clone());
+        }
+        if let Some(item) = &schema_path {
+            error.schema_path.push_front(item.clone());
         }
     }
 }

@@ -628,9 +628,14 @@ impl<'d, 'a> Walker<'d, 'a> {
         if validator.is_valid(schema.value) {
             return Ok(None);
         }
-        let error = validator.iter_errors(schema.value).next().map(|error| {
-            meta::convert_error(&error, &meta::meta_check_roots(dialect), schema.value)
-        });
+        // `check_schema` raises the first error Python's iteration finds.
+        let error = meta::convert_errors(
+            validator.iter_errors(schema.value),
+            &meta::meta_check_schemas(dialect),
+            schema.value,
+        )
+        .into_iter()
+        .next();
         if let Some(message) = error.as_ref().and_then(meta::crash_message) {
             return Err(Stop::Crash(message.to_owned()));
         }

@@ -32,6 +32,7 @@ mod pyformat;
 mod pyobj;
 mod pyregex;
 pub mod pyrepr;
+mod schema_path;
 mod values;
 pub mod version;
 
@@ -87,15 +88,14 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let mut errors = Vec::new();
     let validator = meta::document_validator(version);
     if !validator.is_valid(spec) {
-        for error in validator.iter_errors(spec) {
-            errors.push(meta::convert_error(
-                &error,
-                &meta::document_roots(version),
-                spec,
-            ));
-            if first_only {
-                return Outcome::Invalid(errors);
-            }
+        errors = meta::convert_errors(
+            validator.iter_errors(spec),
+            &meta::document_schemas(version),
+            spec,
+        );
+        if first_only {
+            errors.truncate(1);
+            return Outcome::Invalid(errors);
         }
     }
 

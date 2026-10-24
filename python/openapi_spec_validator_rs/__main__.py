@@ -15,13 +15,29 @@ def main(args: Sequence[str] | None = None) -> None:
     """
     if args is None:
         args = sys.argv[1:]
-    code, out, err, ran = cli_main(list(args))
+    args = list(args)
+    code, out, err, ran = cli_main(args, _replaced_stdin(args))
     if out:
         sys.stdout.write(out)
     if err:
         sys.stderr.write(err)
     if code != 0 or not ran:
         sys.exit(code)
+
+
+def _replaced_stdin(args: list[str]) -> bytes | None:
+    """The content of ``sys.stdin`` when it is not the process's standard input.
+
+    The command line reads ``-`` from file descriptor 0; when ``sys.stdin`` has been
+    replaced (as in tests), its content is passed along instead, as upstream reads
+    ``sys.stdin`` itself.
+    """
+    if not any(arg in ("-", "/-") for arg in args) or sys.stdin is sys.__stdin__:
+        return None
+    data = sys.stdin.read()
+    if isinstance(data, bytes):
+        return data
+    return data.encode("utf-8", "surrogateescape")
 
 
 if __name__ == "__main__":

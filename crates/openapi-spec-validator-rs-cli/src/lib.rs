@@ -8,6 +8,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
@@ -70,6 +71,21 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    run_with_stdin(args, &mut std::io::stdin(), out, err)
+}
+
+/// Like [`run`], reading the `-` file from `stdin` instead of the process's standard
+/// input (the Python package passes a replaced `sys.stdin` this way).
+pub fn run_with_stdin<I, T>(
+    args: I,
+    stdin: &mut (dyn Read + Send),
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let argv = std::iter::once(OsString::from("openapi-spec-validator-rs"))
         .chain(args.into_iter().map(Into::into));
     let args = match Args::try_parse_from(argv) {
@@ -82,10 +98,15 @@ where
         }
     };
     // An I/O error here is a broken pipe or similar: nothing sensible left to report.
-    execute(&args, out, err).unwrap_or(1)
+    execute(&args, &Mutex::new(stdin), out, err).unwrap_or(1)
 }
 
-fn execute(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> std::io::Result<i32> {
+fn execute(
+    args: &Args,
+    stdin: &Mutex<&mut (dyn Read + Send)>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> std::io::Result<i32> {
     let subschema_errors = subschema_mode(args, err)?;
     let options = Options {
         version: SpecVersion::from_cli(&args.schema),
@@ -99,7 +120,7 @@ fn execute(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> std::io::Re
     let results: Vec<FileResult> = args
         .files
         .par_iter()
-        .map(|file| validate_file(file, &options))
+        .map(|file| validate_file(file, &options, stdin))
         .collect();
 
     for result in results {
@@ -160,10 +181,17 @@ struct FileResult {
     result: Result<Outcome, LoadError>,
 }
 
-fn validate_file(file: &str, options: &Options) -> FileResult {
+fn validate_file(
+    file: &str,
+    options: &Options,
+    stdin: &Mutex<&mut (dyn Read + Send)>,
+) -> FileResult {
     if file == "-" || file == "/-" {
         let mut bytes = Vec::new();
-        let result = std::io::stdin()
+        let mut stdin = stdin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = stdin
             .read_to_end(&mut bytes)
             .map_err(|error| LoadError {
                 message: error.to_string(),

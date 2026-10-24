@@ -19,6 +19,7 @@ use crate::error::{SchemaErrorDetails, ValidationError};
 use crate::formats::{self, FormatOutcome, FormatSet};
 use crate::pyregex;
 use crate::pyrepr::{self, PathItem, repr, repr_str};
+use crate::schema_path::{Resource, Search, python_order};
 use crate::version::SpecVersion;
 
 fn bundled(json: &str) -> Value {
@@ -397,67 +398,151 @@ impl<'i> Keyword<'i> for PythonFormat {
 /// `200`, which may be a mapping key or a list index.
 pub(crate) fn convert_error(
     error: &jsonschema::ValidationError<'_>,
-    roots: &[&Value],
+    schemas: &Schemas<'_>,
     instance_root: &Value,
 ) -> ValidationError {
-    convert_relative(error, roots, instance_root, &[], &[])
+    convert_relative(error, schemas, instance_root, &[], &[])
+}
+
+/// Converts errors and puts them in the order Python's jsonschema would yield them
+/// (upstream reports the first one, or lists them all in that order).
+pub(crate) fn convert_errors<'e>(
+    errors: impl Iterator<Item = jsonschema::ValidationError<'e>>,
+    schemas: &Schemas<'_>,
+    instance_root: &Value,
+) -> Vec<ValidationError> {
+    let mut keyed: Vec<(Vec<usize>, ValidationError)> = errors
+        .map(|error| {
+            let converted = convert_error(&error, schemas, instance_root);
+            let key = match (&converted.schema_error, schemas.resources.first()) {
+                (Some(details), Some(root)) => python_order(
+                    &schemas.resources,
+                    root,
+                    &details.schema_path,
+                    instance_root,
+                    &details.instance_path,
+                ),
+                _ => Vec::new(),
+            };
+            (key, converted)
+        })
+        .collect();
+    // Stable: errors Python would yield from the same keyword keep their order.
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    // jsonschema reports `items: false` once per extra item; Python once per array.
+    keyed.dedup_by(|a, b| a.1 == b.1);
+    keyed.into_iter().map(|(_, error)| error).collect()
+}
+
+/// The schema resources a validator was built from, for interpreting its errors.
+pub(crate) struct Schemas<'a> {
+    /// The validation root first, then every resource it references.
+    pub resources: Vec<Resource<'a>>,
+    /// Whether `$ref` hides its sibling keywords (Draft 4 to 7).
+    pub ref_overrides: bool,
+}
+
+impl<'a> Schemas<'a> {
+    fn new(roots: impl IntoIterator<Item = &'a Value>, ref_overrides: bool) -> Self {
+        let resources = roots
+            .into_iter()
+            .map(|contents| Resource {
+                uri: contents
+                    .get("$id")
+                    .or_else(|| contents.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                contents,
+            })
+            .collect();
+        Self {
+            resources,
+            ref_overrides,
+        }
+    }
 }
 
 /// Converts `error` with paths relative to its parent error (an `anyOf`/`oneOf` failure),
-/// whose absolute instance path and evaluation path are given, as jsonschema's
-/// `relative_path` / `relative_schema_path` are for errors in `context`.
+/// as jsonschema's `relative_path` / `relative_schema_path` are for errors in `context`.
+/// The parent paths are absolute (from the validation root).
 fn convert_relative(
     error: &jsonschema::ValidationError<'_>,
-    roots: &[&Value],
+    schemas: &Schemas<'_>,
     instance_root: &Value,
     parent_instance_path: &[PathItem],
-    parent_evaluation_path: &[PathItem],
+    parent_schema_path: &[PathItem],
 ) -> ValidationError {
-    let instance = error.instance().as_ref();
-    let location = path_items(error.schema_path());
+    let mut instance = error.instance().as_ref();
+    let mut location = path_items(error.schema_path());
+    let mut instance_path = instance_path_items(error.instance_path(), instance_root);
+    // jsonschema reports a `false` subschema at its own location; Python's `descend`
+    // returns before recording that step, so the error belongs to the keyword that
+    // descended, without the member it descended into.
+    let false_schema = matches!(error.kind(), ValidationErrorKind::FalseSchema)
+        .then(|| false_schema_step(&mut location, &mut instance_path))
+        .flatten();
     let keyword = match location.last() {
         Some(PathItem::Key(keyword)) => keyword.clone(),
         _ => String::new(),
     };
     let parent = &location[..location.len().saturating_sub(1)];
-    let schema = roots
+    let schema = schemas
+        .resources
         .iter()
-        .filter_map(|root| subschema(root, parent))
-        .find(|schema| schema.get(&keyword).is_some())
-        .cloned()
-        .unwrap_or(Value::Null);
-    let evaluation_path = path_items(error.evaluation_path());
-    let instance_path = instance_path_items(error.instance_path(), instance_root);
-    // Upstream's relative schema path skips `$ref` hops.
-    let schema_path = strip_prefix(&evaluation_path, parent_evaluation_path)
-        .iter()
-        .filter(|item| !matches!(item, PathItem::Key(key) if key == "$ref"))
-        .cloned()
-        .collect();
+        .filter_map(|resource| subschema(resource.contents, parent))
+        .find(|schema| schema.get(&keyword).is_some());
+    // 2020-12 `items: false` fails once for the whole array, with its own message.
+    let items_false = false_schema.is_some_and(|consumed| consumed)
+        && keyword == "items"
+        && schema.is_some_and(|s| s.get("items") == Some(&Value::Bool(false)));
+    if items_false {
+        instance = instance_at(instance_root, &instance_path).unwrap_or(instance);
+    }
+    let schema_path = schema
+        .zip(schemas.resources.first())
+        .and_then(|(target, root)| {
+            Search::new(
+                &schemas.resources,
+                schemas.ref_overrides,
+                &instance_path,
+                target,
+                &keyword,
+            )
+            .run(root.contents, root.uri)
+        })
+        .unwrap_or_else(|| {
+            // Upstream's schema path skips `$ref` hops.
+            path_items(error.evaluation_path())
+                .into_iter()
+                .filter(|item| !matches!(item, PathItem::Key(key) if key == "$ref"))
+                .collect()
+        });
     let context = match error.kind() {
         ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
             context
                 .iter()
                 .flatten()
                 .map(|child| {
-                    convert_relative(
-                        child,
-                        roots,
-                        instance_root,
-                        &instance_path,
-                        &evaluation_path,
-                    )
+                    convert_relative(child, schemas, instance_root, &instance_path, &schema_path)
                 })
                 .collect()
         }
         _ => Vec::new(),
     };
-    let message = python_message(error, instance, &schema);
+    let schema = schema.cloned().unwrap_or(Value::Null);
+    let (message, keyword, schema) = if items_false {
+        (items_false_message(&schema, instance), keyword, schema)
+    } else if false_schema.is_some() {
+        let message = format!("False schema does not allow {}", repr(instance));
+        (message, String::new(), Value::Bool(false))
+    } else {
+        (python_message(error, instance, &schema), keyword, schema)
+    };
     ValidationError::from_schema(
         message,
         SchemaErrorDetails {
             keyword,
-            schema_path,
+            schema_path: strip_prefix(&schema_path, parent_schema_path).to_vec(),
             schema,
             instance_path: strip_prefix(&instance_path, parent_instance_path).to_vec(),
             instance: instance.clone(),
@@ -465,6 +550,82 @@ fn convert_relative(
             context,
         },
     )
+}
+
+/// Rewrites the location of a `false` subschema to the keyword that descended into it,
+/// dropping the member (property, index) that keyword descended into from
+/// `instance_path`. Returns whether a member was dropped, or `None` if the location has
+/// no recognisable parent keyword.
+fn false_schema_step(
+    location: &mut Vec<PathItem>,
+    instance_path: &mut Vec<PathItem>,
+) -> Option<bool> {
+    // Keywords whose subschemas are named (by property, pattern or index).
+    const NAMED: [&str; 8] = [
+        "properties",
+        "patternProperties",
+        "prefixItems",
+        "items",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "dependentSchemas",
+    ];
+    // Keywords that descend into a member of the instance.
+    const CONSUMING: [&str; 8] = [
+        "properties",
+        "patternProperties",
+        "prefixItems",
+        "items",
+        "additionalProperties",
+        "additionalItems",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+    ];
+    let n = location.len();
+    let parent = n.checked_sub(2).and_then(|i| location.get(i));
+    let keyword = match (parent, location.last()?) {
+        (Some(PathItem::Key(parent)), _) if NAMED.contains(&parent.as_str()) => {
+            let parent = parent.clone();
+            location.pop();
+            parent
+        }
+        (_, PathItem::Key(keyword)) => keyword.clone(),
+        _ => return None,
+    };
+    let consumed = CONSUMING.contains(&keyword.as_str());
+    if consumed {
+        instance_path.pop();
+    }
+    Some(consumed)
+}
+
+/// jsonschema's 2020-12 `items` message when `items` is `false`.
+fn items_false_message(schema: &Value, array: &Value) -> String {
+    let prefix = schema
+        .get("prefixItems")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let items = array.as_array().map(Vec::as_slice).unwrap_or_default();
+    let extra = items.len().saturating_sub(prefix);
+    let rest = if extra == 1 {
+        repr(&items[prefix])
+    } else {
+        repr(&Value::Array(
+            items.get(prefix..).unwrap_or_default().to_vec(),
+        ))
+    };
+    let item = if prefix == 1 { "item" } else { "items" };
+    format!("Expected at most {prefix} {item} but found {extra} extra: {rest}")
+}
+
+fn instance_at<'v>(root: &'v Value, path: &[PathItem]) -> Option<&'v Value> {
+    path.iter()
+        .try_fold(root, |value, item| match (value, item) {
+            (Value::Object(map), PathItem::Key(key)) => map.get(key),
+            (Value::Array(items), PathItem::Index(index)) => items.get(*index),
+            _ => None,
+        })
 }
 
 /// Instance path segments typed by the instance itself: `jsonschema` reports any
@@ -499,13 +660,20 @@ fn strip_prefix<'p>(path: &'p [PathItem], prefix: &[PathItem]) -> &'p [PathItem]
     path.strip_prefix(prefix).unwrap_or(path)
 }
 
-/// Schema resources a whole-document error can point into.
-pub(crate) fn document_roots(version: SpecVersion) -> [&'static Value; 2] {
-    [document_schema(version), &PY_DRAFT4]
+/// The schemas whole-document validation of `version` uses.
+pub(crate) fn document_schemas(version: SpecVersion) -> Schemas<'static> {
+    let draft4 = matches!(version, SpecVersion::V2_0 | SpecVersion::V3_0);
+    Schemas::new([document_schema(version), &*PY_DRAFT4], draft4)
 }
 
-/// Schema resources an error from `dialect`'s meta-check can point into.
-pub(crate) fn meta_check_roots(dialect: Dialect) -> Vec<&'static Value> {
+/// The schemas `dialect`'s meta-check uses.
+pub(crate) fn meta_check_schemas(dialect: Dialect) -> Schemas<'static> {
+    let ref_overrides = matches!(dialect, Dialect::Draft4 | Dialect::Draft6 | Dialect::Draft7);
+    Schemas::new(meta_check_roots(dialect), ref_overrides)
+}
+
+/// Schema resources an error from `dialect`'s meta-check can point into, root first.
+fn meta_check_roots(dialect: Dialect) -> Vec<&'static Value> {
     use referencing::meta;
     let draft202012 = || {
         [

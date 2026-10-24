@@ -169,15 +169,30 @@ fn load<'py>(
 /// false when argument parsing ended the run (usage errors, `--help`, `--version`):
 /// upstream's argparse exits in those cases even with status 0, while a successful
 /// validation run returns normally.
+///
+/// `stdin`, when given, is read for the `-` file instead of the process's standard input.
 #[pyfunction]
-fn cli_main(py: Python<'_>, args: Vec<String>) -> (i32, String, String, bool) {
-    py.detach(|| {
+#[pyo3(signature = (args, stdin=None))]
+fn cli_main(
+    py: Python<'_>,
+    args: Vec<String>,
+    stdin: Option<PyBackedBytes>,
+) -> (i32, String, String, bool) {
+    py.detach(move || {
         let argv =
             std::iter::once("openapi-spec-validator-rs").chain(args.iter().map(String::as_str));
         let ran = Args::try_parse_from(argv).is_ok();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = openapi_spec_validator_rs_cli::run(args, &mut out, &mut err);
+        let code = match stdin {
+            Some(data) => openapi_spec_validator_rs_cli::run_with_stdin(
+                &args,
+                &mut std::io::Cursor::new(&*data),
+                &mut out,
+                &mut err,
+            ),
+            None => openapi_spec_validator_rs_cli::run(&args, &mut out, &mut err),
+        };
         (
             code,
             String::from_utf8_lossy(&out).into_owned(),

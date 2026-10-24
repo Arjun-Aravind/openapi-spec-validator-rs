@@ -130,26 +130,15 @@ def _spec(version: str, **fields: Any) -> dict[str, Any]:
     return spec
 
 
-# Differences found through the Python API whose fix belongs in the Rust crates.
+# Cases that once differed through the Python API; kept as regression tests.
 CORE_DIFFERENCES = [
     pytest.param(
         _spec("3.0.3", info={"title": 1, "version": "1"}),
         id="schema-path-through-ref",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="meta-schema errors under a $ref report the referenced definition's "
-            "path (['definitions', 'Info', ...]) instead of jsonschema's "
-            "(['properties', 'info', ...])",
-        ),
     ),
     pytest.param(
         _spec("3.0.3", components={"schemas": {"A": False}}),
         id="context-schema-path-through-ref",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="oneOf context errors under a $ref have schema_path "
-            "['definitions', 'Schema', 'type'] instead of [0, 'type']",
-        ),
     ),
     pytest.param(
         _spec(
@@ -165,11 +154,6 @@ CORE_DIFFERENCES = [
             },
         ),
         id="default-false-subschema",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="a false subschema in a default check gets the parent's keyword and "
-            "path (validator 'x', path ['x']) instead of validator None and no path",
-        ),
     ),
     pytest.param(
         _spec(
@@ -179,11 +163,21 @@ CORE_DIFFERENCES = [
             },
         ),
         id="default-items-false",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="2020-12 'items: false' in a default check reports 'False schema does "
-            "not allow 1' instead of 'Expected at most 0 items but found 1 extra: 1'",
+    ),
+    pytest.param(
+        _spec(
+            "3.0.3",
+            components={
+                "schemas": {
+                    "A": {
+                        "type": "object",
+                        "properties": {"x": False},
+                        "default": {"x": 1},
+                    }
+                }
+            },
         ),
+        id="default-false-subschema-oas30",
     ),
 ]
 

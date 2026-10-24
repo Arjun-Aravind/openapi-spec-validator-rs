@@ -33,10 +33,6 @@ _CACHE_INTERNALS = (
     "counts calls to upstream's internal jsonschema-path SchemaPath.from_dict; "
     "references are resolved in Rust"
 )
-_STDIN = (
-    "main() ignores a replaced sys.stdin: the Rust CLI reads the process's standard "
-    "input, and the CLI crate has no way to pass stdin content in"
-)
 
 # Differences that are intentional or cannot be removed. Keys are test IDs relative to
 # upstream's `tests/integration`; a key without `[...]` covers every parametrization.
@@ -87,17 +83,6 @@ KNOWN_DIFFERENCES: dict[str, str] = {
     "::test_spec_validator_uses_default_resolved_cache_on_invalid_env": _CACHE_INTERNALS,
 }
 
-# Bugs whose fix belongs in the Rust crates (the Python layer cannot fix them).
-NEEDS_CORE_CHANGE: dict[str, str] = {
-    "test_main.py::test_schema_stdin": _STDIN,
-    "test_main.py::test_errors_all_lists_all_validation_errors": _STDIN,
-    "test_main.py::test_deprecated_error_ignored_when_new_flag_used": _STDIN,
-    # Passes today only because the empty standard input under pytest is invalid too.
-    "test_main.py::test_malformed_schema_stdin": _STDIN,
-}
-
-# Tests above that pass for an unrelated reason: marked, but not strictly.
-_PASSES_BY_ACCIDENT = {"test_main.py::test_malformed_schema_stdin"}
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -121,11 +106,9 @@ def _key(item: pytest.Item) -> str:
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         key = _key(item)
-        for reasons in (KNOWN_DIFFERENCES, NEEDS_CORE_CHANGE):
-            reason = reasons.get(key) or reasons.get(key.split("[", 1)[0])
-            if reason:
-                strict = key not in _PASSES_BY_ACCIDENT
-                item.add_marker(pytest.mark.xfail(reason=reason, strict=strict))
+        reason = KNOWN_DIFFERENCES.get(key) or KNOWN_DIFFERENCES.get(key.split("[", 1)[0])
+        if reason:
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
 
 
 @pytest.fixture(autouse=True)
