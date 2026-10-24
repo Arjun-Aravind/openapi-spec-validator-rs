@@ -62,6 +62,9 @@ const STDIN_DEPTH_LIMIT: usize = 9992;
 ///
 /// This models a binary stream: libyaml detects UTF-8/UTF-16 itself and reports bad bytes as
 /// `ReaderError`s; `\r\n` is handled by libyaml. Use [`load_text`] for stdin.
+///
+/// Loading (and dropping) the deepest document accepted, about 9,990 nested containers,
+/// takes under 1 MiB of stack in an optimized build.
 pub fn load(bytes: &[u8], stream_name: &str) -> Result<Value, LoadError> {
     if let Some(value) = fast_json::try_load(bytes) {
         return Ok(value);

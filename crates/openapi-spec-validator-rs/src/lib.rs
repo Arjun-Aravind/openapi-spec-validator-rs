@@ -26,11 +26,13 @@ mod document;
 pub mod error;
 mod formats;
 mod keywords;
-pub mod loader;
+mod loader;
 mod meta;
 mod pyformat;
 mod pyobj;
 mod pyregex;
+/// Python `repr`/`pprint` emulation, shared with the Python bindings. Not a supported API.
+#[doc(hidden)]
 pub mod pyrepr;
 mod schema_path;
 mod values;
@@ -50,6 +52,7 @@ use crate::keywords::{Stop, Walker};
 
 pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError, best_match};
 pub use crate::loader::{LoadError, TextErrors, load, load_text};
+pub use crate::pyrepr::PathItem;
 pub use crate::version::{DetectError, SpecVersion, detect_version};
 
 /// How many errors to collect.
@@ -75,6 +78,10 @@ pub struct Options {
 }
 
 /// Validates an already-parsed spec document.
+///
+/// Validation recurses with the document's nesting and along `$ref` chains, so it runs
+/// on threads of its own with a large stack: any document [`load`] accepts can be
+/// validated from any thread.
 pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let version = match options.version {
         Some(version) => version,
@@ -84,32 +91,28 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
         },
     };
     let first_only = options.errors == ErrorMode::First;
+    let base_uri = options.base_uri.as_str();
 
     // Upstream checks the whole document against the meta-schema first, then walks it.
     // The two are independent, so on large documents they run concurrently; the results
     // are combined in upstream's order.
-    let (document_errors, walk) = if spec_is_large(spec) {
-        std::thread::scope(|scope| {
-            let document = std::thread::Builder::new()
-                .stack_size(META_STACK_SIZE)
-                .spawn_scoped(scope, || document_errors(spec, version));
-            let walk = walk(spec, version, first_only, &options.base_uri);
-            let errors = match document {
-                Ok(handle) => handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                Err(_) => document_errors(spec, version),
-            };
-            (errors, walk)
-        })
-    } else {
-        let errors = document_errors(spec, version);
-        if first_only && !errors.is_empty() {
-            (errors, Ok(Vec::new()))
+    let (document_errors, walk) = std::thread::scope(|scope| {
+        if spec_is_large(spec) {
+            let document = on_large_stack(scope, || document_errors(spec, version));
+            let walk = on_large_stack(scope, || walk(spec, version, first_only, base_uri));
+            (document.join(), walk.join())
         } else {
-            (errors, walk(spec, version, first_only, &options.base_uri))
+            on_large_stack(scope, || {
+                let errors = document_errors(spec, version);
+                if first_only && !errors.is_empty() {
+                    (errors, Ok(Vec::new()))
+                } else {
+                    (errors, walk(spec, version, first_only, base_uri))
+                }
+            })
+            .join()
         }
-    };
+    });
 
     let mut errors = document_errors;
     if first_only && !errors.is_empty() {
@@ -129,8 +132,44 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     }
 }
 
-/// Stack size for the meta-schema thread: validation recurses with document nesting.
-const META_STACK_SIZE: usize = 256 << 20;
+/// Stack size for validation threads: enough for documents nested as deeply as the
+/// loader allows (pages are only committed as they are used).
+const STACK_SIZE: usize = 256 << 20;
+
+/// Work running on a large-stack thread, or already done on the current thread when no
+/// thread could be spawned.
+enum Running<'scope, T> {
+    Spawned(std::thread::ScopedJoinHandle<'scope, T>),
+    Done(T),
+}
+
+impl<T> Running<'_, T> {
+    fn join(self) -> T {
+        match self {
+            Self::Spawned(handle) => handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Self::Done(value) => value,
+        }
+    }
+}
+
+fn on_large_stack<'scope, T: Send + 'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    work: impl Fn() -> T + Send + Sync + 'scope,
+) -> Running<'scope, T> {
+    let work = std::sync::Arc::new(work);
+    let spawned = {
+        let work = std::sync::Arc::clone(&work);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, move || work())
+    };
+    match spawned {
+        Ok(handle) => Running::Spawned(handle),
+        Err(_) => Running::Done(work()),
+    }
+}
 
 /// Whether a document is big enough for running its two passes concurrently to pay off.
 fn spec_is_large(spec: &Value) -> bool {
@@ -182,8 +221,12 @@ fn walk(
 /// Reads, parses and validates a spec file, resolving relative `$ref`s against it.
 ///
 /// Read and parse failures are returned as [`LoadError`], whose message matches what
-/// upstream prints for them.
+/// upstream prints for them. Like [`validate`], this runs on a thread with a large stack.
 pub fn validate_path(path: &Path, options: &Options) -> Result<Outcome, LoadError> {
+    std::thread::scope(|scope| on_large_stack(scope, || read_and_validate(path, options)).join())
+}
+
+fn read_and_validate(path: &Path, options: &Options) -> Result<Outcome, LoadError> {
     let not_found = || LoadError {
         message: format!("No such file: {}", path.display()),
     };
