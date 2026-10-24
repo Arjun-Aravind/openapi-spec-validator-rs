@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from collections import deque
 from collections.abc import Iterable, Sequence
-from pprint import pformat
 from textwrap import dedent, indent
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -329,4 +328,8 @@ def _format_as_index(container: str, indices: Iterable[str | int]) -> str:
 
 
 def _pretty(thing: Any, prefix: str) -> str:
+    # Imported here: pprint costs several milliseconds at start-up and is only needed
+    # when an error is rendered.
+    from pprint import pformat
+
     return indent(pformat(thing, width=72, sort_dicts=False), prefix).lstrip()

@@ -22,6 +22,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The Python package imports `urllib.request` and `pprint` only when they are needed,
+  which takes about 20 ms off every run of the `pip`-installed command. README.md and
+  BENCHMARKS.md now say which command their figures are for, and give the
+  `pip`-installed command's.
 - Documents named by `$ref`s are read when a reference to them is first followed, like
   upstream, instead of all being read before validation starts; references inside
   examples and extensions are no longer read at all.

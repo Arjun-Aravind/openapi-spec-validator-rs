@@ -12,7 +12,6 @@ from __future__ import annotations
 from contextlib import closing
 from types import ModuleType
 from typing import Final
-from urllib.request import urlopen
 
 __all__ = ["retrieve"]
 
@@ -44,6 +43,10 @@ def retrieve(url: str) -> bytes:
     otherwise the raw ``urllib`` body is returned, to be decoded like a file. Any
     exception makes the reference unresolvable.
     """
+    # Imported here: urllib.request costs tens of milliseconds at start-up and most runs
+    # never fetch anything.
+    from urllib.request import urlopen
+
     requests = _requests_module()
     if requests is not None:
         response = requests.get(url, timeout=TIMEOUT, verify=True)

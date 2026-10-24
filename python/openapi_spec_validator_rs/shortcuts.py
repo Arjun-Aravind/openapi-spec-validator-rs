@@ -9,7 +9,6 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlparse
-from urllib.request import urlopen
 
 from openapi_spec_validator_rs import _core, handlers
 from openapi_spec_validator_rs.exceptions import (
@@ -168,6 +167,9 @@ def _read_url(spec_url: str) -> tuple[bytes, str]:
     scheme = urlparse(spec_url).scheme
     if scheme not in _URL_SCHEMES:
         raise ValueError(f"Scheme {scheme} not allowed")
+    # Imported here: urllib.request costs tens of milliseconds at start-up.
+    from urllib.request import urlopen
+
     with closing(urlopen(spec_url, timeout=_URL_TIMEOUT)) as response:
         # PyYAML names a stream after its `name` attribute, else `<file>`.
         stream_name = str(getattr(response, "name", "<file>"))

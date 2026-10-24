@@ -8,9 +8,9 @@ specs. It ships as a command-line tool, a Python package with the same API, and 
 hook. It is an independent project, not affiliated with or endorsed by the maintainers of
 openapi-spec-validator.
 
-Command-line run time, including start-up and parsing, on an Apple M4
-(mean of 10 runs; the range is openapi-spec-validator with its jsonschema-rs backend and with
-its default backend):
+Command-line run time of the native binary, including start-up and parsing, on an Apple
+M4 (mean of 10 runs; the range is openapi-spec-validator with its jsonschema-rs backend and
+with its default backend):
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator | Speed-up |
 |---|---:|---:|---:|
@@ -18,6 +18,10 @@ its default backend):
 | GitHub (OpenAPI 3.0, YAML, 10.3 MB) | **152 ms** | 6.45 s – 8.20 s | **42–54×** |
 | Stripe (OpenAPI 3.0, JSON, 8.3 MB) | **31 ms** | 1.80 s – 2.82 s | **59–92×** |
 | Kubernetes (Swagger 2.0, JSON, 4.3 MB) | **20 ms** | 762 ms – 2.13 s | **39–109×** |
+
+The `pip`-installed command runs the same validator behind a Python entry point, which adds
+about 25 ms of interpreter start-up per run: 45 ms for Kubernetes and 80 ms for GitHub's
+JSON, 17 to 100 times faster than openapi-spec-validator.
 
 ## Why
 
@@ -155,7 +159,7 @@ validates FastAPI's `app.openapi()` does), median of 5 runs:
 | Kubernetes (4.3 MB) | **11 ms** | 0.33 s (29× slower) | 1.70 s (149× slower) |
 
 It also needs about a quarter of the memory on JSON specs: 81 MiB instead of 290 MiB for
-GitHub's.
+GitHub's (98 MiB through the `pip`-installed command).
 
 Validating every spec in the APIs.guru directory that openapi-spec-validator accepts (3,646
 files, 535 MB of YAML) takes 1.6 s instead of 202–332 s.

@@ -7,7 +7,8 @@ Measured on an Apple M4 (10 cores, 16 GB) with macOS 26.6, CPython 3.13.14, hype
 ## Command line, one spec at a time
 
 Mean wall time of 10 runs (after one warm-up), including process start-up, reading and
-parsing:
+parsing, for the native binary (`cargo build --release`; the `pip`-installed command is
+measured below):
 
 | Spec | openapi-spec-validator-rs | openapi-spec-validator, jsonschema-rs backend | openapi-spec-validator, default backend | vacuum (validation rules) |
 |---|---:|---:|---:|---:|
@@ -24,6 +25,20 @@ Peak memory (resident set):
 | GitHub (OpenAPI 3.0, YAML, 10.3 MB) | 132 MiB | 292 MiB | 289 MiB | 1434 MiB |
 | Stripe (OpenAPI 3.0, JSON, 8.3 MB) | 49 MiB | 184 MiB | 181 MiB | 857 MiB |
 | Kubernetes (Swagger 2.0, JSON, 4.3 MB) | 31 MiB | 122 MiB | 120 MiB | 325 MiB |
+
+### The pip-installed command
+
+`pip install openapi-spec-validator-rs` installs a Python entry point that imports the
+package and runs the same validator, so every run also pays for starting the interpreter
+and importing the package (about 25 ms together). Mean wall time of 10 runs, and peak
+memory, for that command:
+
+| Spec | openapi-spec-validator-rs (pip) | vs jsonschema-rs backend | vs default backend | Peak memory |
+|---|---:|---:|---:|---:|
+| GitHub (OpenAPI 3.0, JSON, 13.5 MB) | 80 ms | 80× | 102× | 98 MiB |
+| GitHub (OpenAPI 3.0, YAML, 10.3 MB) | 172 ms | 37× | 48× | 151 MiB |
+| Stripe (OpenAPI 3.0, JSON, 8.3 MB) | 56 ms | 32× | 50× | 66 MiB |
+| Kubernetes (Swagger 2.0, JSON, 4.3 MB) | 45 ms | 17× | 47× | 47 MiB |
 
 ## Python API
 
@@ -70,7 +85,7 @@ start-up and parsing, exactly as a user or CI job experiences them.
 
 | Tool | Command |
 |---|---|
-| openapi-spec-validator-rs 0.1.0 | `openapi-spec-validator-rs FILE` |
+| openapi-spec-validator-rs 0.1.0 | `openapi-spec-validator-rs FILE` (the native binary, `target/release/openapi-spec-validator-rs`) |
 | openapi-spec-validator 0.9.0, default backend | `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND=jsonschema openapi-spec-validator FILE` |
 | openapi-spec-validator 0.9.0, jsonschema-rs backend | `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND=jsonschema-rs openapi-spec-validator FILE` (jsonschema-rs 0.60.1) |
 | vacuum 0.35.1 | `vacuum lint -q -x -r bench/vacuum-validate.yaml FILE` |
