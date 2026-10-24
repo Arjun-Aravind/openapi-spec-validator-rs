@@ -53,11 +53,11 @@ pip install openapi-spec-validator-rs
 ```
 
 This installs the `openapi-spec-validator-rs` command and the `openapi_spec_validator_rs`
-Python package (wheels for Linux, macOS and Windows; Python 3.10+). To build the command
-from source instead:
+Python package (wheels for Linux, macOS and Windows; Python 3.10+). The command is also
+available on its own, without Python, as a Rust binary:
 
 ```bash
-cargo install --path crates/openapi-spec-validator-rs-cli
+cargo install openapi-spec-validator-rs-cli --locked
 ```
 
 ## Command line
@@ -99,7 +99,12 @@ errors = list(OpenAPIV31SpecValidator(spec_dict).iter_errors())
 Errors are `OpenAPIValidationError` (or one of its subclasses: `DuplicateOperationIDError`,
 `ParameterDuplicateError`, `UnresolvableParameterError`, `ExtraParametersError`) with the
 same attributes and messages as upstream's. Moving over is usually a matter of changing the
-import from `openapi_spec_validator` to `openapi_spec_validator_rs`.
+import from `openapi_spec_validator` to `openapi_spec_validator_rs`. Code that catches
+exception classes by their upstream names must catch this package's instead: its
+`OpenAPIValidationError` is not a `jsonschema.exceptions.ValidationError`, and failures
+that stop validation (an unresolvable `$ref`, for example) raise
+`ValidationAbortedError` rather than `referencing`'s or Python's own exceptions; see
+[COMPATIBILITY.md][compatibility] for the mapping.
 
 ## Validate your FastAPI schema in CI
 
