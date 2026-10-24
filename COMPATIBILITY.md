@@ -137,7 +137,7 @@ Where upstream raises something other than a validation error, this package rais
 | `TypeError` from version detection (non-string version, document not a mapping) | `TypeError`, same message |
 | Any other exception while validating: `referencing.exceptions.Unresolvable` (and its `PointerToNowhere`, `InvalidAnchor`, ...), `RecursionError`, `ValueError` for malformed path templates, `KeyError`, ... | `ValidationAbortedError` (an `OpenAPISpecValidatorError`), same message. This is what the CLI prints as `Error: ...` with exit status 2. |
 | PyYAML's or `json`'s exceptions while reading (`validate_url`, `validate_path`) | `SpecReadError` (an `OpenAPISpecValidatorError`), same message |
-| Python's own exception messages (`RecursionError`, `TypeError` from version detection) | Worded as CPython 3.12 and later word them, whichever interpreter runs this package: `maximum recursion depth exceeded` (3.10 and 3.11 add `in comparison` or `while calling a Python object`) and `expected string or bytes-like object, got 'float'` (3.10 omits `, got 'float'`). |
+| `RecursionError` (`$ref` cycles, deep defaults) | `ValidationAbortedError("maximum recursion depth exceeded")`, worded as CPython 3.12 and later word it whichever interpreter runs this package (3.10 and 3.11 add `in comparison` or `while calling a Python object`). The `TypeError` from version detection is raised by the interpreter itself, so its wording is always the running interpreter's, as upstream's is. |
 | `OSError("No such file: ...")` from the CLI's reader | `validate_path`: `FileNotFoundError`, same message |
 
 ### Documents passed as Python objects

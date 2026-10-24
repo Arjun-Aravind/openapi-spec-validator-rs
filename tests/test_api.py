@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -117,17 +119,35 @@ def test_unknown_version(spec: Any) -> None:
     assert str(info.value) == ""
 
 
+def native_type_error(action: Callable[[], Any]) -> str:
+    """The interpreter's own wording for the TypeError ``action`` raises (it differs
+    between Python versions)."""
+    try:
+        action()
+    except TypeError as error:
+        return str(error)
+    raise AssertionError("expected a TypeError")
+
+
 @pytest.mark.parametrize(
-    ("spec", "message"),
+    ("spec", "same_error"),
     [
-        ({"openapi": 3.0}, "expected string or bytes-like object, got 'float'"),
-        (None, "argument of type 'NoneType' is not iterable"),
-        ("swagger: 2.0", "string indices must be integers, not 'str'"),
+        ({"openapi": 3.0}, lambda: re.match("", 3.0)),  # type: ignore[call-overload]
+        (None, lambda: "openapi" in None),  # type: ignore[operator]
+        ("swagger: 2.0", lambda: (lambda text: text["swagger"])("swagger: 2.0")),
     ],
+    ids=["float", "None", "str"],
 )
-def test_malformed_version_raises_type_error(spec: Any, message: str) -> None:
+def test_malformed_version_raises_type_error(
+    spec: Any, same_error: Callable[[], Any], write: Callable[[str, str], Path]
+) -> None:
+    message = re.escape(native_type_error(same_error))
     with pytest.raises(TypeError, match=message):
         osv.validate(spec)
+    # Read from a file, the version is detected by the core; the error is the same.
+    path = write("malformed.json", json.dumps(spec))
+    with pytest.raises(TypeError, match=message):
+        osv.validate_path(path)
 
 
 def test_cls_overrides_detection(make_spec) -> None:
@@ -348,7 +368,8 @@ def test_validate_path(write, make_spec) -> None:
         osv.validate_path(empty)
 
     float_version = write("float.yaml", "swagger: 2.0\n")
-    with pytest.raises(TypeError, match="got 'float'"):
+    expected = re.escape(native_type_error(lambda: re.match("", 2.0)))  # type: ignore[call-overload]
+    with pytest.raises(TypeError, match=expected):
         osv.validate_path(float_version)
 
 

@@ -77,10 +77,6 @@ def modern_wording(message: str) -> str:
     COMPATIBILITY.md)."""
     if sys.version_info < (3, 12) and message.startswith("maximum recursion depth exceeded"):
         return "maximum recursion depth exceeded"
-    if sys.version_info < (3, 11) and message.startswith(
-        "expected string or bytes-like object"
-    ):
-        return "expected string or bytes-like object"
     return message
 
 
