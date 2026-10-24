@@ -35,8 +35,56 @@ impl Crash {
     }
 }
 
-/// Python's default recursion limit; upstream crashes on deeper `$ref` chains.
-const MAX_REF_DEPTH: usize = 1000;
+/// A failed `Resolver.lookup`: one of `referencing`'s `Unresolvable` exceptions (named by
+/// `class`), or another exception raised while following the pointer (`class` is `None`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LookupError {
+    class: Option<&'static str>,
+    message: String,
+}
+
+impl LookupError {
+    fn referencing(class: &'static str, message: String) -> Self {
+        Self {
+            class: Some(class),
+            message,
+        }
+    }
+
+    /// Whether `referencing` raised it (jsonschema wraps those; others propagate as is).
+    pub(crate) fn is_referencing(&self) -> bool {
+        self.class.is_some()
+    }
+
+    /// The exception jsonschema raises while validating: `_WrappedReferencingError`
+    /// prints the wrapped class name first.
+    pub(crate) fn wrapped(self) -> Crash {
+        match self.class {
+            Some(class) => Crash(format!("{class}: {}", self.message)),
+            None => Crash(self.message),
+        }
+    }
+}
+
+/// The exception jsonschema-path lets through while walking the spec: the bare message.
+impl From<LookupError> for Crash {
+    fn from(error: LookupError) -> Self {
+        Crash(error.message)
+    }
+}
+
+impl From<Crash> for LookupError {
+    fn from(Crash(message): Crash) -> Self {
+        Self {
+            class: None,
+            message,
+        }
+    }
+}
+
+/// The longest `$ref` chain upstream follows before Python's recursion limit (1000
+/// frames) stops it, for a chain starting at a component (measured).
+const MAX_REF_DEPTH: usize = 977;
 
 /// A resolved position in one of the documents.
 #[derive(Clone, Copy, Debug)]
@@ -97,37 +145,54 @@ impl<'a> Documents<'a> {
         }
     }
 
-    /// Whether document index `doc` exists (loaded or not).
-    pub fn has_doc(&self, doc: usize) -> bool {
-        doc <= self.externals.len()
-    }
-
-    /// The contents of document `doc`, if it was loaded successfully.
-    pub fn doc_value(&self, doc: usize) -> Option<&Value> {
-        self.document(doc).ok()
-    }
-
     /// `Resolver.lookup(ref)` without following `$ref`s at the target, as
     /// jsonschema's `$ref` keyword does before descending into it.
-    pub fn lookup_node(&self, doc: usize, reference: &str) -> Result<Node<'_>, Crash> {
+    pub fn lookup_node(&self, doc: usize, reference: &str) -> Result<Node<'_>, LookupError> {
         self.lookup(doc, reference)
     }
 
-    fn document(&self, doc: usize) -> Result<&Value, Crash> {
-        if doc == 0 {
-            return Ok(self.root);
+    /// `Resolver.lookup(ref)` for a resolver whose base URI is `base`, which `$id`s met
+    /// while validating may have moved away from every document's URI.
+    pub fn lookup_from(&self, base: &str, reference: &str) -> Result<Node<'_>, LookupError> {
+        let unresolvable = || LookupError::referencing("Unresolvable", reference.to_owned());
+        let (uri, fragment) = match reference.strip_prefix('#') {
+            Some(fragment) => (base.to_owned(), fragment.to_owned()),
+            None => {
+                let joined = join_uri(base, reference).ok_or_else(unresolvable)?;
+                let (uri, fragment) = joined.split_once('#').unwrap_or((&joined, ""));
+                (uri.to_owned(), fragment.to_owned())
+            }
+        };
+        let doc = *self.by_uri.get(&uri).ok_or_else(unresolvable)?;
+        // A document that could not be read or parsed is `Unretrievable`, which
+        // `referencing` reports as `Unresolvable(ref)`.
+        let contents = self.document(doc).ok_or_else(unresolvable)?;
+        self.fragment(doc, contents, &fragment)
+    }
+
+    /// The URI documents are known by, as `$id`s and `$ref`s are joined with it.
+    pub fn join(base: &str, reference: &str) -> String {
+        if reference.is_empty() {
+            return base.to_owned();
         }
-        self.externals[doc - 1]
-            .value
-            .as_ref()
-            .map_err(|message| Crash(message.clone()))
+        if base.is_empty() {
+            return reference.to_owned();
+        }
+        join_uri(base, reference).unwrap_or_else(|| reference.to_owned())
+    }
+
+    fn document(&self, doc: usize) -> Option<&Value> {
+        if doc == 0 {
+            return Some(self.root);
+        }
+        self.externals[doc - 1].value.as_ref().ok()
     }
 
     fn load_externals(&mut self) {
         let mut pending = vec![0];
         while let Some(doc) = pending.pop() {
             let mut refs = Vec::new();
-            if let Ok(value) = self.document(doc) {
+            if let Some(value) = self.document(doc) {
                 collect_refs(value, &mut refs);
             }
             let base = self.uri(doc).to_owned();
@@ -168,45 +233,47 @@ impl<'a> Documents<'a> {
     }
 
     /// `Resolver.lookup(ref)` from `referencing`, relative to document `doc`.
-    fn lookup<'d>(&'d self, doc: usize, reference: &str) -> Result<Node<'d>, Crash> {
-        let (target_doc, fragment) = if let Some(fragment) = reference.strip_prefix('#') {
-            (doc, fragment.to_owned())
-        } else {
-            // `str(Unresolvable(ref))` is the reference itself.
-            let unresolvable = || Crash(reference.to_owned());
-            let joined = join_uri(self.uri(doc), reference).ok_or_else(unresolvable)?;
-            let (uri, fragment) = joined.split_once('#').unwrap_or((&joined, ""));
-            let target = *self.by_uri.get(uri).ok_or_else(unresolvable)?;
-            (target, fragment.to_owned())
-        };
-        let contents = self.document(target_doc)?;
+    fn lookup<'d>(&'d self, doc: usize, reference: &str) -> Result<Node<'d>, LookupError> {
+        self.lookup_from(self.uri(doc), reference)
+    }
+
+    /// The part of `lookup` after retrieval: `fragment` (without `#`) inside `contents`.
+    fn fragment<'d>(
+        &'d self,
+        doc: usize,
+        contents: &'d Value,
+        fragment: &str,
+    ) -> Result<Node<'d>, LookupError> {
         if fragment.is_empty() {
             return Ok(Node {
                 value: contents,
-                doc: target_doc,
+                doc,
             });
         }
         if !fragment.starts_with('/') {
             // Anchors (`#foo`) are only found via `$id`/`$anchor` resources, which
             // upstream's registry would have to crawl; none exist in a plain spec.
             if fragment.contains('/') {
-                return Err(Crash(format!(
-                    "'#{fragment}' is not a valid anchor, neither as a plain name anchor nor as \
-                     a JSON Pointer. You may have intended to use '#/{fragment}', as the slash \
-                     is required *before each segment* of a JSON pointer."
-                )));
+                return Err(LookupError::referencing(
+                    "InvalidAnchor",
+                    format!(
+                        "'#{fragment}' is not a valid anchor, neither as a plain name anchor nor \
+                         as a JSON Pointer. You may have intended to use '#/{fragment}', as the \
+                         slash is required *before each segment* of a JSON pointer."
+                    ),
+                ));
             }
-            return Err(Crash(format!(
-                "{} does not exist within {}",
-                pyrepr::repr_str(&fragment),
-                pyrepr::repr(contents)
-            )));
+            return Err(LookupError::referencing(
+                "NoSuchAnchor",
+                format!(
+                    "{} does not exist within {}",
+                    pyrepr::repr_str(fragment),
+                    pyrepr::repr(contents)
+                ),
+            ));
         }
-        let value = pointer(contents, &fragment)?;
-        Ok(Node {
-            value,
-            doc: target_doc,
-        })
+        let value = pointer(contents, fragment)?;
+        Ok(Node { value, doc })
     }
 
     /// The child `key` of a mapping node, resolved (`path / key`).
@@ -278,7 +345,7 @@ pub(crate) fn as_ref(value: &Value) -> Option<&str> {
 }
 
 /// `Resource.pointer` from `referencing`.
-fn pointer<'d>(document: &'d Value, pointer: &str) -> Result<&'d Value, Crash> {
+fn pointer<'d>(document: &'d Value, pointer: &str) -> Result<&'d Value, LookupError> {
     let nowhere = || {
         let mut message = format!(
             "{} does not exist within {}",
@@ -291,7 +358,7 @@ fn pointer<'d>(document: &'d Value, pointer: &str) -> Result<&'d Value, Crash> {
                  property ''. If you intended to point to the entire resource, you should use '#'.",
             );
         }
-        Crash(message)
+        LookupError::referencing("PointerToNowhere", message)
     };
     let decoded = percent_decode_str(&pointer[1..]).decode_utf8_lossy();
     let mut contents = document;
@@ -325,7 +392,8 @@ fn pointer<'d>(document: &'d Value, pointer: &str) -> Result<&'d Value, Crash> {
                 return Err(Crash(format!(
                     "'{}' object is not subscriptable",
                     python_type_name(other)
-                )));
+                ))
+                .into());
             }
         };
     }
@@ -352,11 +420,24 @@ fn python_int(s: &str) -> Option<i128> {
     Some(if negative { -value } else { value })
 }
 
+/// Every string that may be resolved as a reference: `$ref`s, and discriminator mapping
+/// values, which OpenAPI 3.0 default validation follows.
 fn collect_refs(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
             if let Some(Value::String(reference)) = map.get("$ref") {
                 out.push(reference.clone());
+            }
+            if let Some(Value::Object(mapping)) = map
+                .get("discriminator")
+                .and_then(|discriminator| discriminator.get("mapping"))
+            {
+                out.extend(
+                    mapping
+                        .values()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
             }
             for child in map.values() {
                 collect_refs(child, out);
@@ -393,6 +474,10 @@ fn retrieve(uri: &str, reference: &str) -> Result<Value, String> {
     let url = Url::parse(uri).map_err(|_| unresolvable())?;
     if url.scheme() != "file" {
         // Upstream fetches http(s) references over the network; this port does not.
+        return Err(unresolvable());
+    }
+    // urllib opens the URL's whole selector, query included, as the file name.
+    if url.query().is_some() {
         return Err(unresolvable());
     }
     let path = url.to_file_path().map_err(|()| unresolvable())?;

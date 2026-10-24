@@ -345,8 +345,12 @@ impl<'d, 'a> Walker<'d, 'a> {
 
             let name = self.item(parameter, "name")?;
             let location = self.item(parameter, "in")?;
-            pyobj::check_hashable(name).map_err(Stop::Crash)?;
-            pyobj::check_hashable(location).map_err(Stop::Crash)?;
+            // jsonschema-path hands out lists and mappings as `SchemaPath`s, which are
+            // hashable and equal only to the same path: such a key is never a duplicate.
+            let container = |v: &Value| v.is_array() || v.is_object();
+            if container(name) || container(location) {
+                continue;
+            }
             let duplicate = seen
                 .iter()
                 .any(|(n, l)| pyobj::py_eq(n, name) && pyobj::py_eq(l, location));
@@ -661,7 +665,7 @@ impl<'d, 'a> Walker<'d, 'a> {
 
     /// `ValueValidator`: `default` must validate against its own schema.
     fn default_value(&mut self, schema: Node<'d>, value: &'d Value) -> Step {
-        let errors = self.defaults.validate(schema, value)?;
+        let errors = self.defaults.validate(schema, value, self.first_only)?;
         for error in errors {
             self.emit(error)?;
         }

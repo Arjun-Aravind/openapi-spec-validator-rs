@@ -1,0 +1,15 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Parameter names that are mappings", "version": "1.0"},
+  "paths": {
+    "/pets": {
+      "get": {
+        "parameters": [
+          {"name": {"x": 1}, "in": "query", "schema": {"type": "string"}},
+          {"name": {"x": 1}, "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}

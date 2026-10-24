@@ -1,0 +1,15 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "A discriminator mapping that is not a mapping", "version": "1.0"},
+  "paths": {},
+  "components": {
+    "schemas": {
+      "Pet": {
+        "oneOf": [{"$ref": "#/components/schemas/Cat"}],
+        "discriminator": {"propertyName": "kind", "mapping": "Cat"},
+        "default": {"kind": "Cat"}
+      },
+      "Cat": {"type": "object"}
+    }
+  }
+}

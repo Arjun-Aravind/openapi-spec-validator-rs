@@ -1,0 +1,11 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Python's float division decides multipleOf", "version": "1.0"},
+  "paths": {},
+  "components": {
+    "schemas": {
+      "Price": {"type": "number", "multipleOf": 0.1, "default": 0.3},
+      "Half": {"type": "number", "multipleOf": 0.5, "default": 1.5}
+    }
+  }
+}

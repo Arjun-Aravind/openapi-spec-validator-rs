@@ -3,36 +3,32 @@
 //! Swagger 2.0 and OpenAPI 3.0 use openapi-schema-validator's `OAS30Validator`, a
 //! Draft 4 variant with OpenAPI keywords; it is ported here keyword by keyword so
 //! that iteration order, messages and edge-case exceptions match. OpenAPI 3.1 and 3.2
-//! use `OAS31Validator` / `OAS32Validator` (Draft 2020-12 with OpenAPI formats), which
-//! is delegated to the `jsonschema` crate with Python-compatible `format`/`pattern`.
+//! use `OAS31Validator` / `OAS32Validator`, ported in [`crate::pyjsonschema`].
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
-use jsonschema::paths::Location;
-use jsonschema::{Keyword, Registry};
 use serde_json::{Map, Value};
 
-use crate::document::{Crash, Documents, Node};
+use crate::document::{Crash, Documents, LookupError, Node};
 use crate::error::{SchemaErrorDetails, ValidationError};
 use crate::formats::{self, FormatOutcome, FormatSet};
 use crate::meta;
+use crate::pyjsonschema::Evaluator;
 use crate::pyobj::{self, Num, json_equal, num_cmp, truthy};
 use crate::pyregex::{self, PyRegex};
 use crate::pyrepr::{PathItem, repr, repr_float, repr_str};
-use crate::schema_path::Resource;
 use crate::version::{SpecVersion, python_type_name};
 
-/// Upstream recurses in Python; a reference cycle hits the recursion limit.
-const MAX_DEPTH: usize = 250;
+/// Python frames upstream can still use when it starts validating a `default`: its
+/// recursion limit (1000) minus the frames of the command line and the walk above it.
+/// Measured with `$ref` chains and recursive schemas under a component's `default`.
+const MAX_FRAMES: usize = 982;
 
 pub(crate) struct DefaultValidator<'d, 'a> {
     docs: &'d Documents<'a>,
     version: SpecVersion,
     regexes: HashMap<String, Result<PyRegex, String>>,
-    /// Pointer of every container node, built on first use (3.1+ only).
-    pointers: Option<HashMap<usize, (usize, String)>>,
-    registry: Option<Registry<'d>>,
 }
 
 impl<'d, 'a> DefaultValidator<'d, 'a> {
@@ -41,249 +37,88 @@ impl<'d, 'a> DefaultValidator<'d, 'a> {
             docs,
             version,
             regexes: HashMap::new(),
-            pointers: None,
-            registry: None,
         }
     }
 
-    /// All errors of `value` against `schema`, or the exception upstream would raise.
+    /// The errors of `value` against `schema`, or the exception upstream would raise.
+    /// Upstream iterates lazily: with `first_only`, nothing after the first error is
+    /// evaluated, so an exception further on never happens.
     pub fn validate(
         &mut self,
         schema: Node<'d>,
         value: &'d Value,
+        first_only: bool,
     ) -> Result<Vec<ValidationError>, Crash> {
-        match self.version {
+        let limit = if first_only { 1 } else { usize::MAX };
+        let errors = match self.version {
             SpecVersion::V2_0 | SpecVersion::V3_0 => {
                 let mut errors = Vec::new();
                 let mut eval = Oas30 {
                     docs: self.docs,
                     regexes: &mut self.regexes,
-                    depth: 0,
+                    frames: 0,
+                    limit,
                 };
                 eval.descend(value, schema.value, schema.doc, &mut errors)?;
-                Ok(errors
-                    .into_iter()
-                    .map(Oas30Error::into_validation_error)
-                    .collect())
+                errors
             }
-            SpecVersion::V3_1 | SpecVersion::V3_2 => self.validate_2020(schema, value),
-        }
-    }
-
-    fn validate_2020(
-        &mut self,
-        schema: Node<'d>,
-        value: &'d Value,
-    ) -> Result<Vec<ValidationError>, Crash> {
-        let formats = if self.version == SpecVersion::V3_1 {
-            FormatSet::Oas31
-        } else {
-            FormatSet::Oas32
-        };
-        let docs = self.docs;
-        let pointers = self.pointers.get_or_insert_with(|| index_pointers(docs));
-        let reference = match pointers.get(&schema.id()) {
-            Some((doc, pointer)) => {
-                let uri = document_uri(docs, *doc);
-                serde_json::json!({ "$ref": format!("{uri}#{pointer}") })
-            }
-            // Boolean schemas have no address worth indexing; validate them inline.
-            None => schema.value.clone(),
-        };
-        let registry = match &self.registry {
-            Some(registry) => registry,
-            None => {
-                let mut builder = Registry::new();
-                for doc in 0..docs_count(docs) {
-                    if let Some(root) = document_value(docs, doc) {
-                        builder = builder
-                            .add(document_uri(docs, doc), root)
-                            .map_err(|e| Crash(e.to_string()))?;
-                    }
-                }
-                self.registry = Some(builder.prepare().map_err(|e| Crash(e.to_string()))?);
-                self.registry.as_ref().expect("registry was just built")
+            SpecVersion::V3_1 | SpecVersion::V3_2 => {
+                let formats = if self.version == SpecVersion::V3_1 {
+                    FormatSet::Oas31
+                } else {
+                    FormatSet::Oas32
+                };
+                Evaluator::run(self.docs, formats, &mut self.regexes, schema, value, limit)?
             }
         };
-        let validator = jsonschema::options()
-            .with_draft(jsonschema::Draft::Draft202012)
-            .with_registry(registry)
-            .with_base_uri("urn:openapi-spec-validator-rs:default")
-            .should_validate_formats(true)
-            .with_keyword("format", meta::python_format(formats))
-            .with_keyword("pattern", py_pattern)
-            .build(&reference)
-            .map_err(|e| Crash(e.to_string()))?;
-        let uris: Vec<String> = (0..docs_count(docs))
-            .map(|doc| document_uri(docs, doc))
-            .collect();
-        let mut resources = vec![Resource {
-            uri: "urn:openapi-spec-validator-rs:default",
-            contents: &reference,
-        }];
-        resources.extend((0..docs_count(docs)).filter_map(|doc| {
-            Some(Resource {
-                uri: &uris[doc],
-                contents: document_value(docs, doc)?,
-            })
-        }));
-        let schemas = meta::Schemas {
-            resources,
-            ref_overrides: false,
-        };
-        let errors = meta::convert_errors(validator.iter_errors(value), &schemas, value);
-        if let Some(message) = errors.iter().find_map(meta::crash_message) {
-            return Err(Crash(message.to_owned()));
-        }
-        Ok(errors)
+        Ok(errors
+            .into_iter()
+            .map(ValueError::into_validation_error)
+            .collect())
     }
 }
 
-/// Synthetic URI of document `doc` for the default-value registry.
-fn document_uri(docs: &Documents<'_>, doc: usize) -> String {
-    let uri = docs.uri(doc);
-    if uri.is_empty() {
-        format!("urn:openapi-spec-validator-rs:doc:{doc}")
-    } else {
-        uri.to_owned()
-    }
-}
-
-fn docs_count(docs: &Documents<'_>) -> usize {
-    (0..).take_while(|i| docs.has_doc(*i)).count()
-}
-
-fn document_value<'d>(docs: &'d Documents<'_>, doc: usize) -> Option<&'d Value> {
-    docs.doc_value(doc)
-}
-
-/// Maps the address of every container value to its document and JSON pointer.
-fn index_pointers(docs: &Documents<'_>) -> HashMap<usize, (usize, String)> {
-    fn walk(
-        value: &Value,
-        doc: usize,
-        pointer: &mut String,
-        out: &mut HashMap<usize, (usize, String)>,
-    ) {
-        if !(value.is_object() || value.is_array()) {
-            return;
-        }
-        out.entry(std::ptr::from_ref(value) as usize)
-            .or_insert_with(|| (doc, pointer.clone()));
-        let len = pointer.len();
-        match value {
-            Value::Object(map) => {
-                for (key, child) in map {
-                    pointer.push('/');
-                    pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
-                    walk(child, doc, pointer, out);
-                    pointer.truncate(len);
-                }
-            }
-            Value::Array(items) => {
-                for (i, child) in items.iter().enumerate() {
-                    pointer.push('/');
-                    pointer.push_str(&i.to_string());
-                    walk(child, doc, pointer, out);
-                    pointer.truncate(len);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = HashMap::new();
-    for doc in 0..docs_count(docs) {
-        if let Some(root) = document_value(docs, doc) {
-            walk(root, doc, &mut String::new(), &mut out);
-        }
-    }
-    // Pointers are used inside URI fragments.
-    for (_, pointer) in out.values_mut() {
-        *pointer = percent_encoding::utf8_percent_encode(pointer, FRAGMENT).to_string();
-    }
-    out
-}
-
-const FRAGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'%')
-    .add(b'{')
-    .add(b'}')
-    .add(b'|')
-    .add(b'\\')
-    .add(b'^')
-    .add(b'[')
-    .add(b']');
-
-/// `pattern` with Python `re.search` semantics; a pattern `re` rejects raises upstream.
-struct PyPattern {
-    pattern: String,
-    regex: Result<PyRegex, String>,
-}
-
-fn py_pattern<'a>(
-    _: &'a Map<String, Value>,
-    value: &'a Value,
-    _: Location,
-) -> Result<Box<dyn for<'i> Keyword<'i>>, jsonschema::ValidationError<'a>> {
-    let pattern = value.as_str().unwrap_or_default().to_owned();
-    let regex = PyRegex::compile(&pattern).map_err(|error| error.python_str(&pattern));
-    Ok(Box::new(PyPattern { pattern, regex }))
-}
-
-impl<'i> Keyword<'i> for PyPattern {
-    fn validate(&self, instance: &'i Value) -> Result<(), jsonschema::ValidationError<'i>> {
-        let Value::String(text) = instance else {
-            return Ok(());
-        };
-        let regex = self
-            .regex
-            .as_ref()
-            .map_err(|message| meta::crash_error(message))?;
-        match regex.search(text) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(jsonschema::ValidationError::custom(format!(
-                "{} does not match {}",
-                repr(instance),
-                repr_str(&self.pattern)
-            ))),
-            Err(message) => Err(meta::crash_error(&message)),
-        }
-    }
-
-    fn is_valid(&self, instance: &'i Value) -> bool {
-        self.validate(instance).is_ok()
-    }
-}
-
-/// An error produced by the OAS 3.0 evaluator, with jsonschema's relative paths.
-struct Oas30Error {
-    message: String,
-    /// `None` while unset; jsonschema fills it in at the keyword that reported the error.
-    /// Errors from a `false` schema keep `Some("")`, i.e. `validator=None`.
-    keyword: Option<String>,
+/// An error of a `default` value, built up like jsonschema's `ValidationError`: the
+/// keyword function creates it, and each enclosing `descend` adds what it knows.
+pub(crate) struct ValueError {
+    pub message: String,
+    /// `validator`: `None` while unset; filled in by the `descend` that applied the
+    /// keyword. Errors from a `false` schema keep `Some("")`, i.e. `validator=None`.
+    pub keyword: Option<String>,
+    /// Whether `schema` and `instance` are set (by the keyword's `descend`).
+    pub located: bool,
     /// Set for an error from a `false` schema until it leaves the `descend` that met that
     /// schema: Python's `descend` returns before adding its path segments.
-    bare_false: bool,
-    schema_path: VecDeque<PathItem>,
-    instance_path: VecDeque<PathItem>,
-    schema: Value,
-    instance: Value,
-    cause: Option<String>,
-    context: Vec<Oas30Error>,
+    pub bare_false: bool,
+    pub schema_path: VecDeque<PathItem>,
+    pub instance_path: VecDeque<PathItem>,
+    pub schema: Value,
+    pub instance: Value,
+    pub cause: Option<String>,
+    pub context: Vec<ValueError>,
 }
 
-impl Oas30Error {
+impl ValueError {
+    pub(crate) fn new(message: String) -> Self {
+        Self {
+            message,
+            keyword: None,
+            located: false,
+            bare_false: false,
+            schema_path: VecDeque::new(),
+            instance_path: VecDeque::new(),
+            schema: Value::Null,
+            instance: Value::Null,
+            cause: None,
+            context: Vec::new(),
+        }
+    }
+
     fn into_validation_error(self) -> ValidationError {
         let context = self
             .context
             .into_iter()
-            .map(Oas30Error::into_validation_error)
+            .map(ValueError::into_validation_error)
             .collect();
         ValidationError::from_schema(
             self.message,
@@ -304,10 +139,39 @@ impl Oas30Error {
 struct Oas30<'d, 'a, 'r> {
     docs: &'d Documents<'a>,
     regexes: &'r mut HashMap<String, Result<PyRegex, String>>,
-    depth: usize,
+    /// Python frames in use, to reproduce `RecursionError`.
+    frames: usize,
+    /// How many errors the innermost consumer takes before it stops iterating
+    /// (see [`DefaultValidator::validate`]).
+    limit: usize,
 }
 
 impl<'d> Oas30<'d, '_, '_> {
+    fn enter(&mut self, frames: usize) -> Result<(), Crash> {
+        self.frames += frames;
+        if self.frames > MAX_FRAMES {
+            return Err(Crash::recursion());
+        }
+        Ok(())
+    }
+
+    fn full(&self, errors: &[ValueError]) -> bool {
+        errors.len() >= self.limit
+    }
+
+    /// The errors of `run`, for a consumer that takes at most `limit` of them.
+    fn collect(
+        &mut self,
+        limit: usize,
+        run: impl FnOnce(&mut Self, &mut Vec<ValueError>) -> Result<(), Crash>,
+    ) -> Result<Vec<ValueError>, Crash> {
+        let outer = std::mem::replace(&mut self.limit, limit);
+        let mut errors = Vec::new();
+        let result = run(self, &mut errors);
+        self.limit = outer;
+        result.map(|()| errors)
+    }
+
     /// `Validator.descend`/`iter_errors`: applies every known keyword of `schema`, in
     /// schema order (OAS30Validator applies `$ref` siblings too).
     fn descend(
@@ -315,42 +179,39 @@ impl<'d> Oas30<'d, '_, '_> {
         instance: &'d Value,
         schema: &'d Value,
         doc: usize,
-        errors: &mut Vec<Oas30Error>,
+        errors: &mut Vec<ValueError>,
     ) -> Result<(), Crash> {
         let map = match schema {
             Value::Bool(true) => return Ok(()),
             Value::Bool(false) => {
-                errors.push(Oas30Error {
-                    message: format!("False schema does not allow {}", repr(instance)),
-                    keyword: Some(String::new()),
-                    bare_false: true,
-                    schema_path: VecDeque::new(),
-                    instance_path: VecDeque::new(),
-                    schema: schema.clone(),
-                    instance: instance.clone(),
-                    cause: None,
-                    context: Vec::new(),
-                });
+                let mut error =
+                    ValueError::new(format!("False schema does not allow {}", repr(instance)));
+                error.keyword = Some(String::new());
+                error.located = true;
+                error.bare_false = true;
+                error.schema = schema.clone();
+                error.instance = instance.clone();
+                errors.push(error);
                 return Ok(());
             }
             Value::Object(map) => map,
-            other => {
-                return Err(Crash(format!(
-                    "'{}' object has no attribute 'items'",
-                    python_type_name(other)
-                )));
-            }
+            other => return Err(not_a_schema(other)),
         };
-        self.depth += 1;
-        if self.depth > MAX_DEPTH {
-            return Err(Crash::recursion());
-        }
+        self.enter(1)?;
         for (keyword, value) in map {
+            if self.full(errors) {
+                break;
+            }
             let start = errors.len();
+            self.enter(1)?;
             self.keyword(keyword, value, instance, map, doc, errors)?;
+            self.frames -= 1;
             for error in &mut errors[start..] {
                 if error.keyword.is_none() {
                     error.keyword = Some(keyword.clone());
+                }
+                if !error.located {
+                    error.located = true;
                     error.schema = schema.clone();
                     error.instance = instance.clone();
                 }
@@ -359,33 +220,27 @@ impl<'d> Oas30<'d, '_, '_> {
                 }
             }
         }
-        self.depth -= 1;
+        self.frames -= 1;
         Ok(())
     }
 
+    /// `validator.evolve(schema=schema).is_valid(instance)`: stops at the first error.
     fn is_valid(
         &mut self,
         instance: &'d Value,
         schema: &'d Value,
         doc: usize,
     ) -> Result<bool, Crash> {
-        let mut errors = Vec::new();
-        self.descend(instance, schema, doc, &mut errors)?;
+        self.enter(1)?;
+        let errors = self.collect(1, |this, errors| {
+            this.descend(instance, schema, doc, errors)
+        })?;
+        self.frames -= 1;
         Ok(errors.is_empty())
     }
 
-    fn error(message: String) -> Oas30Error {
-        Oas30Error {
-            message,
-            keyword: None,
-            bare_false: false,
-            schema_path: VecDeque::new(),
-            instance_path: VecDeque::new(),
-            schema: Value::Null,
-            instance: Value::Null,
-            cause: None,
-            context: Vec::new(),
-        }
+    fn error(message: String) -> ValueError {
+        ValueError::new(message)
     }
 
     /// `TypeChecker.is_type` of the OAS 3.0 type checker.
@@ -408,7 +263,7 @@ impl<'d> Oas30<'d, '_, '_> {
         instance: &'d Value,
         schema: &'d Map<String, Value>,
         doc: usize,
-        errors: &mut Vec<Oas30Error>,
+        errors: &mut Vec<ValueError>,
     ) -> Result<(), Crash> {
         let inst = || repr(instance);
         match keyword {
@@ -416,39 +271,13 @@ impl<'d> Oas30<'d, '_, '_> {
                 let Some(x) = number(instance) else {
                     return Ok(());
                 };
-                let Some(divisor) = pyobj::as_number(value) else {
-                    return Err(unsupported_operand("%", instance, value));
-                };
-                let failed = match (x, divisor) {
-                    (_, Num::Float(d)) => {
-                        if d == 0.0 {
-                            return Err(Crash("float division by zero".to_owned()));
-                        }
-                        let quotient = x.as_f64() / d;
-                        if quotient.is_nan() {
-                            return Err(Crash("cannot convert float NaN to integer".to_owned()));
-                        }
-                        quotient.is_finite() && quotient.trunc() != quotient
-                    }
-                    (Num::Int(a), Num::Int(b)) => {
-                        if b == 0 {
-                            return Err(Crash("integer modulo by zero".to_owned()));
-                        }
-                        a % b != 0
-                    }
-                    (Num::Float(a), Num::Int(b)) => {
-                        if b == 0 {
-                            return Err(Crash("float modulo by zero".to_owned()));
-                        }
-                        #[allow(clippy::cast_precision_loss)]
-                        let b = b as f64;
-                        a % b != 0.0
-                    }
-                };
+                let failed = multiple_of(x, instance, value)?;
                 if failed {
-                    let divisor = match divisor {
-                        Num::Float(f) => repr_float(f),
-                        Num::Int(_) => repr(value),
+                    let divisor = match value {
+                        Value::Number(n) if n.is_f64() => {
+                            repr_float(n.as_f64().unwrap_or_default())
+                        }
+                        _ => repr(value),
                     };
                     errors.push(Self::error(format!(
                         "{} is not a multiple of {divisor}",
@@ -589,14 +418,18 @@ impl<'d> Oas30<'d, '_, '_> {
                                 let start = errors.len();
                                 self.descend(instance, subschema, doc, errors)?;
                                 prefix(&mut errors[start..], None, Some(PathItem::Index(index)));
+                                if self.full(errors) {
+                                    break;
+                                }
                             }
                         }
                         "anyOf" => {
                             let mut all = Vec::new();
                             let mut matched = false;
                             for (index, subschema) in subschemas.iter().enumerate() {
-                                let mut errs = Vec::new();
-                                self.descend(instance, subschema, doc, &mut errs)?;
+                                let mut errs = self.collect(usize::MAX, |this, errs| {
+                                    this.descend(instance, subschema, doc, errs)
+                                })?;
                                 if errs.is_empty() {
                                     matched = true;
                                     break;
@@ -617,8 +450,9 @@ impl<'d> Oas30<'d, '_, '_> {
                             let mut all = Vec::new();
                             let mut first_valid = None;
                             for (index, subschema) in subschemas.iter().enumerate() {
-                                let mut errs = Vec::new();
-                                self.descend(instance, subschema, doc, &mut errs)?;
+                                let mut errs = self.collect(usize::MAX, |this, errs| {
+                                    this.descend(instance, subschema, doc, errs)
+                                })?;
                                 if errs.is_empty() {
                                     first_valid = Some(index);
                                     break;
@@ -675,6 +509,9 @@ impl<'d> Oas30<'d, '_, '_> {
                     let start = errors.len();
                     self.descend(item, value, doc, errors)?;
                     prefix(&mut errors[start..], Some(PathItem::Index(index)), None);
+                    if self.full(errors) {
+                        break;
+                    }
                 }
             }
             "properties" => {
@@ -696,6 +533,9 @@ impl<'d> Oas30<'d, '_, '_> {
                             Some(PathItem::Key(property.clone())),
                             Some(PathItem::Key(property.clone())),
                         );
+                        if self.full(errors) {
+                            break;
+                        }
                     }
                 }
             }
@@ -739,6 +579,9 @@ impl<'d> Oas30<'d, '_, '_> {
                         "{} is a required property",
                         repr(&property)
                     )));
+                    if self.full(errors) {
+                        break;
+                    }
                 }
             }
             "additionalProperties" => {
@@ -758,6 +601,9 @@ impl<'d> Oas30<'d, '_, '_> {
                             Some(PathItem::Key(extra.to_owned())),
                             None,
                         );
+                        if self.full(errors) {
+                            break;
+                        }
                     }
                 } else if value == &Value::Bool(false) {
                     let verb = if extras.len() == 1 { "was" } else { "were" };
@@ -792,13 +638,17 @@ impl<'d> Oas30<'d, '_, '_> {
                 }
             }
             "$ref" => {
+                // `Resolver.lookup` starts with `ref.startswith("#")`.
                 let Value::String(reference) = value else {
                     return Err(Crash(format!(
-                        "unhashable type: '{}'",
+                        "'{}' object has no attribute 'startswith'",
                         python_type_name(value)
                     )));
                 };
-                let target = self.docs.lookup_node(doc, reference)?;
+                let target = self
+                    .docs
+                    .lookup_node(doc, reference)
+                    .map_err(LookupError::wrapped)?;
                 self.descend(instance, target.value, target.doc, errors)?;
             }
             _ => {}
@@ -812,7 +662,7 @@ impl<'d> Oas30<'d, '_, '_> {
         len: usize,
         limit: &Value,
         instance: &Value,
-        errors: &mut Vec<Oas30Error>,
+        errors: &mut Vec<ValueError>,
     ) -> Result<(), Crash> {
         let Some(limit_num) = pyobj::as_number(limit) else {
             let op = if keyword.starts_with("max") { ">" } else { "<" };
@@ -886,14 +736,16 @@ impl<'d> Oas30<'d, '_, '_> {
         instance: &'d Value,
         schema: &'d Map<String, Value>,
         doc: usize,
-        errors: &mut Vec<Oas30Error>,
+        errors: &mut Vec<ValueError>,
     ) -> Result<(), Crash> {
         let discriminator = &schema["discriminator"];
         let Value::Object(discriminator) = discriminator else {
-            return Err(Crash(format!(
-                "'{}' object is not subscriptable",
-                python_type_name(discriminator)
-            )));
+            // `discriminator["propertyName"]`
+            return Err(Crash(match discriminator {
+                Value::String(_) => "string indices must be integers, not 'str'".to_owned(),
+                Value::Array(_) => "list indices must be integers or slices, not str".to_owned(),
+                other => format!("'{}' object is not subscriptable", python_type_name(other)),
+            }));
         };
         let prop_name = discriminator
             .get("propertyName")
@@ -905,6 +757,7 @@ impl<'d> Oas30<'d, '_, '_> {
             )));
             return Ok(());
         };
+        pyobj::check_hashable(prop_name).map_err(Crash)?;
         let prop_value = prop_name.as_str().and_then(|name| object.get(name));
         let Some(prop_value) = prop_value.filter(|v| truthy(v)) else {
             errors.push(Self::error(format!(
@@ -914,9 +767,19 @@ impl<'d> Oas30<'d, '_, '_> {
             )));
             return Ok(());
         };
-        let mapped = discriminator
-            .get("mapping")
-            .and_then(Value::as_object)
+        // `discriminator.get("mapping", {}).get(prop_value)`
+        let mapping = match discriminator.get("mapping") {
+            None => None,
+            Some(Value::Object(mapping)) => Some(mapping),
+            Some(other) => {
+                return Err(Crash(format!(
+                    "'{}' object has no attribute 'get'",
+                    python_type_name(other)
+                )));
+            }
+        };
+        pyobj::check_hashable(prop_value).map_err(Crash)?;
+        let mapped = mapping
             .and_then(|mapping| prop_value.as_str().and_then(|key| mapping.get(key)))
             .filter(|v| truthy(v));
         let reference = match mapped {
@@ -933,8 +796,14 @@ impl<'d> Oas30<'d, '_, '_> {
             None => format!("#/components/schemas/{}", pyobj::py_str(prop_value)),
         };
         match self.docs.lookup_node(doc, &reference) {
-            Ok(target) => self.descend(instance, target.value, target.doc, errors),
-            Err(_) => {
+            // `descend(instance, {"$ref": ref})`: one more `descend` and the `$ref` keyword.
+            Ok(target) => {
+                self.enter(2)?;
+                self.descend(instance, target.value, target.doc, errors)?;
+                self.frames -= 2;
+                Ok(())
+            }
+            Err(error) if error.is_referencing() => {
                 errors.push(Self::error(format!(
                     "{} reference {} could not be resolved",
                     repr(instance),
@@ -942,13 +811,14 @@ impl<'d> Oas30<'d, '_, '_> {
                 )));
                 Ok(())
             }
+            Err(error) => Err(error.into()),
         }
     }
 }
 
 /// Applies the `path` / `schema_path` arguments of one `descend` call to the errors it
 /// produced, except to errors from a `false` schema met by that very call.
-fn prefix(errors: &mut [Oas30Error], path: Option<PathItem>, schema_path: Option<PathItem>) {
+fn prefix(errors: &mut [ValueError], path: Option<PathItem>, schema_path: Option<PathItem>) {
     for error in errors {
         if error.bare_false {
             error.bare_false = false;
@@ -963,15 +833,108 @@ fn prefix(errors: &mut [Oas30Error], path: Option<PathItem>, schema_path: Option
     }
 }
 
+/// jsonschema's `multipleOf` test: whether `instance` (the number `x`) fails it.
+/// A float divisor divides in floating point (`int(q) != q`), falling back to exact
+/// fractions when the quotient overflows; otherwise `instance % divisor` decides.
+pub(crate) fn multiple_of(x: Num, instance: &Value, divisor: &Value) -> Result<bool, Crash> {
+    if let Value::Number(n) = divisor {
+        if n.is_f64() {
+            let d = n.as_f64().unwrap_or_default();
+            if d == 0.0 {
+                return Err(Crash("float division by zero".to_owned()));
+            }
+            let quotient = x.as_f64() / d;
+            if quotient.is_finite() {
+                return Ok(quotient.trunc() != quotient);
+            }
+            return Ok(!exact_multiple(x, d));
+        }
+    }
+    let Some(divisor) = pyobj::as_number(divisor) else {
+        return Err(unsupported_operand("%", instance, divisor));
+    };
+    Ok(match (x, divisor) {
+        (Num::Int(a), Num::Int(b)) => {
+            if b == 0 {
+                return Err(Crash("integer modulo by zero".to_owned()));
+            }
+            a % b != 0
+        }
+        (Num::Float(a), Num::Int(b)) => {
+            if b == 0 {
+                return Err(Crash("float modulo by zero".to_owned()));
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let b = b as f64;
+            a % b != 0.0
+        }
+        // Integral divisors only reach here as ints or bools.
+        (_, Num::Float(_)) => false,
+    })
+}
+
+/// `(Fraction(x) / Fraction(d)).denominator == 1`, i.e. `d` divides `x` exactly.
+fn exact_multiple(x: Num, d: f64) -> bool {
+    /// `value` as `odd * 2**exponent` (`odd` is 0 for zero).
+    fn split(mantissa: i128, exponent: i32) -> (i128, i32) {
+        if mantissa == 0 {
+            return (0, 0);
+        }
+        let zeros = mantissa.trailing_zeros();
+        #[allow(clippy::cast_possible_wrap)]
+        (mantissa >> zeros, exponent + zeros as i32)
+    }
+    fn decompose(f: f64) -> (i128, i32) {
+        let bits = f.to_bits();
+        let sign = if bits >> 63 == 0 { 1 } else { -1 };
+        #[allow(clippy::cast_possible_truncation)]
+        let exponent = ((bits >> 52) & 0x7ff) as i32;
+        let fraction = i128::from(bits & ((1 << 52) - 1));
+        let (mantissa, exponent) = if exponent == 0 {
+            (fraction, -1074)
+        } else {
+            (fraction | (1 << 52), exponent - 1075)
+        };
+        split(sign * mantissa, exponent)
+    }
+    let (a, a_exp) = match x {
+        Num::Int(i) => split(i, 0),
+        Num::Float(f) => decompose(f),
+    };
+    let (b, b_exp) = decompose(d);
+    a == 0 || (a % b == 0 && a_exp >= b_exp)
+}
+
+/// The exception `descend` raises for a schema that is neither a mapping nor a boolean:
+/// `Resolver.in_subresource` reads its `id` (Draft 4 rules: `"$ref" in schema` first),
+/// then `applicable_validators` calls `schema.items()`.
+fn not_a_schema(schema: &Value) -> Crash {
+    let has_ref = match schema {
+        Value::String(s) => s.contains("$ref"),
+        Value::Array(items) => items.iter().any(|item| item.as_str() == Some("$ref")),
+        other => {
+            return Crash(format!(
+                "argument of type '{}' is not iterable",
+                python_type_name(other)
+            ));
+        }
+    };
+    let attribute = if has_ref { "items" } else { "get" };
+    Crash(format!(
+        "'{}' object has no attribute '{attribute}'",
+        python_type_name(schema)
+    ))
+}
+
 /// A number for jsonschema's `is_type(instance, "number")` (bools excluded).
-fn number(value: &Value) -> Option<Num> {
+pub(crate) fn number(value: &Value) -> Option<Num> {
     match value {
         Value::Number(n) => Some(pyobj::number(n)),
         _ => None,
     }
 }
 
-fn unsupported_comparison(op: &str, left: &Value, right: &Value) -> Crash {
+pub(crate) fn unsupported_comparison(op: &str, left: &Value, right: &Value) -> Crash {
     Crash(format!(
         "'{op}' not supported between instances of '{}' and '{}'",
         python_type_name(left),

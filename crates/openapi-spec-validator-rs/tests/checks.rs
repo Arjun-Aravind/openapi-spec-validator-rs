@@ -268,4 +268,39 @@ fn upstream_exceptions() {
         run("ref_missing_file"),
         Outcome::Error("./missing.json#/X".to_owned())
     );
+    // urllib opens `file:///...json?x=1` as a file name of its own, which does not exist.
+    assert_eq!(
+        run("ref_with_query"),
+        Outcome::Error("?x=1#/components/schemas/B".to_owned())
+    );
+    assert_crash(
+        "discriminator_mapping_not_object",
+        "'str' object has no attribute 'get'",
+    );
+}
+
+#[test]
+fn unhashable_parameter_names_are_never_duplicates() {
+    let invalid = "{'name': {'x': 1}, 'in': 'query', 'schema': {'type': 'string'}} is not valid \
+                   under any of the given schemas";
+    assert_errors(
+        "parameter_name_mapping",
+        &[
+            (OpenApiValidation, invalid),
+            (OpenApiValidation, invalid),
+            (
+                OpenApiValidation,
+                "[{'name': {'x': 1}, 'in': 'query', 'schema': {'type': 'string'}}, {'name': \
+                 {'x': 1}, 'in': 'query', 'schema': {'type': 'string'}}] has non-unique elements",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn float_multiple_of_in_31_defaults() {
+    assert_errors(
+        "v31_default_float_multiple_of",
+        &[(OpenApiValidation, "0.3 is not a multiple of 0.1")],
+    );
 }

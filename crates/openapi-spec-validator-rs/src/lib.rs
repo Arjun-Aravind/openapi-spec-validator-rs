@@ -29,6 +29,7 @@ mod keywords;
 mod loader;
 mod meta;
 mod pyformat;
+mod pyjsonschema;
 mod pyobj;
 mod pyregex;
 /// Python `repr`/`pprint` emulation, shared with the Python bindings. Not a supported API.

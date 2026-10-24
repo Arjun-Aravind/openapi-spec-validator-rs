@@ -1,0 +1,11 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "A reference with a query string", "version": "1.0"},
+  "paths": {},
+  "components": {
+    "schemas": {
+      "A": {"$ref": "?x=1#/components/schemas/B"},
+      "B": {"type": "string"}
+    }
+  }
+}
