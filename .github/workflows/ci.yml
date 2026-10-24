@@ -41,6 +41,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  msrv:
+    name: rust 1.85 (minimum supported)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -55,13 +66,18 @@ jobs:
       - run: cargo test --locked
 
   python:
-    name: python tests
+    name: python tests (${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported interpreter and the newest; the wheels are abi3.
+        python-version: ["3.10", "3.13"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Fetch the reference implementation's test suite
