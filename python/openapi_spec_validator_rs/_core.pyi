@@ -7,6 +7,8 @@ __all__ = ["CoreError", "__version__", "cli_main", "load", "validate", "validate
 
 __version__: Final[str]
 
+def _check_interpreter() -> None: ...
+
 @final
 class CoreError:
     """One validation error, as produced by the validator."""

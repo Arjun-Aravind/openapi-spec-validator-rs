@@ -47,7 +47,7 @@ def read_from_stdin(filename: str = "") -> tuple[Any, str]:
     as upstream ignores it)."""
     del filename
     stream = getattr(sys.stdin, "buffer", sys.stdin)
-    data = handlers.read_stream(stream)
+    data = handlers.read_stream(stream, text=True)
     if isinstance(data, str):
         data = data.encode("utf-8", "surrogateescape")
     return _core.load(data, "<stdin>"), ""

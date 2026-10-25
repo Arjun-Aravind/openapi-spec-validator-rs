@@ -5,6 +5,7 @@ The API mirrors openapi-spec-validator's: :func:`validate`, :func:`validate_url`
 :func:`validate_path`.
 """
 
+from openapi_spec_validator_rs import _core
 from openapi_spec_validator_rs._core import __version__
 from openapi_spec_validator_rs.exceptions import (
     DuplicateOperationIDError,
@@ -40,6 +41,9 @@ from openapi_spec_validator_rs.validators import (
     OpenAPIV32SpecValidator,
     SpecValidator,
 )
+
+# Fails cleanly in a second (sub)interpreter, which would share the extension's objects.
+_core._check_interpreter()
 
 __all__ = [
     "DuplicateOperationIDError",

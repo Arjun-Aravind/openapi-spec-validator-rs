@@ -26,33 +26,41 @@ _CHUNK_SIZE: Final = 16 * 1024
 _UNREADABLE: Final = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ufffe\uffff]")
 
 
-def read_stream(stream: IO[bytes]) -> bytes:
+def read_stream(stream: IO[bytes], text: bool = False) -> bytes:
     """Reads a binary stream only as far as PyYAML's reader would get.
 
     PyYAML parses a stream as it reads it, so a document libyaml cannot even decode fails
     at the first offending bytes, however much follows them: upstream gives up on
     ``/dev/zero`` after one buffer. Reading stops at the first bytes libyaml would refuse
-    (a sequence that is not UTF-8, or a character YAML does not allow), which the parser
-    then meets and reports as upstream does; everything else is read whole. Streams in
-    UTF-16 (declared by a byte-order mark) are read whole.
+    (a sequence that is not UTF-8 or UTF-16, or a character YAML does not allow), which
+    the parser then meets and reports as upstream does; everything else is read whole.
+    The encoding is detected as libyaml detects it (UTF-16 after a byte-order mark),
+    except for the bytes behind a text stream (``text=True``, ``sys.stdin``), which Python
+    decodes as UTF-8 before PyYAML sees them.
     """
     data = bytearray()
-    decoder = codecs.getincrementaldecoder("utf-8")()
+    decoder = None if not text else codecs.getincrementaldecoder("utf-8")()
     checked = 0
-    utf16 = None
     while chunk := stream.read(_CHUNK_SIZE):
         data += chunk
-        if utf16 is None and len(data) >= 2:
-            utf16 = bytes(data[:2]) in (b"\xff\xfe", b"\xfe\xff")
-        if utf16 is not False:
-            continue
+        if decoder is None:
+            if len(data) < 2:
+                continue
+            if data[:2] == b"\xff\xfe":
+                decoder = codecs.getincrementaldecoder("utf-16-le")()
+                checked = 2
+            elif data[:2] == b"\xfe\xff":
+                decoder = codecs.getincrementaldecoder("utf-16-be")()
+                checked = 2
+            else:
+                decoder = codecs.getincrementaldecoder("utf-8")()
         try:
-            # The decoder keeps an incomplete trailing sequence for the next chunk.
-            text = decoder.decode(data[checked:])
+            # The decoder keeps an incomplete character for the next chunk.
+            decoded = decoder.decode(data[checked:])
         except UnicodeDecodeError:
             break
         checked = len(data)
-        if _UNREADABLE.search(text):
+        if _UNREADABLE.search(decoded):
             break
     return bytes(data)
 

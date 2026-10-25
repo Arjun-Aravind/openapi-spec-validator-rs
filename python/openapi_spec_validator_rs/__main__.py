@@ -37,7 +37,7 @@ def _replaced_stdin(args: list[str]) -> bytes | None:
         return None
     buffer = getattr(sys.stdin, "buffer", None)
     if buffer is not None:
-        return handlers.read_stream(buffer)
+        return handlers.read_stream(buffer, text=True)
     data = sys.stdin.read()
     if isinstance(data, bytes):
         return data
