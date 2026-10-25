@@ -1,0 +1,20 @@
+# Keeps the commit-pinned actions in the workflows current (the version comment next to
+# each pin is updated along with it).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    # Lock-file-only updates: the manifests name minimum versions on purpose.
+    versioning-strategy: lockfile-only
+    groups:
+      cargo:
+        patterns: ["*"]
