@@ -450,6 +450,7 @@ impl<'d, 'a> Walker<'d, 'a> {
     /// Visits are deduplicated by identity, first visit wins: a schema first reached
     /// as a nested subschema never gets the `required` check.
     fn schema(&mut self, schema: Node<'d>, require_properties: bool, meta_checked: bool) -> Step {
+        crate::context::check();
         let value = schema.value;
         if pyobj::as_dict(value).is_none() && !value.is_boolean() {
             return self.emit_new(

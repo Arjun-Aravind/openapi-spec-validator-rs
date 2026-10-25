@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use openapi_spec_validator_rs::{
-    DetectError, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, detect_version,
+    DetectError, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, ValidationError,
+    detect_version,
 };
 use openapi_spec_validator_rs_cli::Args;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -93,14 +94,34 @@ fn into_errors(
     match outcome {
         Outcome::Valid => Ok(Vec::new()),
         Outcome::Invalid(errors) => {
+            // Upstream builds each message as it finds the error: an object whose
+            // `repr()` raises fails validation there.
+            for error in &errors {
+                if let Some(raised) = raised_in(py, error, &objects) {
+                    return Err(raised);
+                }
+            }
             let objects = Arc::new(objects);
             Ok(errors
                 .into_iter()
                 .map(|error| CoreError::new(error, Arc::clone(&objects)))
                 .collect())
         }
-        Outcome::Error(message) => Err(exception(py, "ValidationAbortedError", (message,))),
+        Outcome::Error(message) => Err(objects
+            .raised_for(py, &message)
+            .unwrap_or_else(|| exception(py, "ValidationAbortedError", (message,)))),
     }
+}
+
+/// The exception a description raised that `error`'s messages (its own and those of
+/// the subschema errors it carries, which Python builds first) include.
+fn raised_in(py: Python<'_>, error: &ValidationError, objects: &PythonObjects) -> Option<PyErr> {
+    error
+        .schema_error
+        .iter()
+        .flat_map(|details| details.context.iter())
+        .find_map(|child| raised_in(py, child, objects))
+        .or_else(|| objects.raised_for(py, &error.message))
 }
 
 /// Validates a spec given as Python objects, as the given version (`"2.0"`, `"3.0"`,
@@ -274,9 +295,38 @@ fn cli_main(
     Ok(result)
 }
 
+/// The interpreter the extension was initialised in.
+static HOME_INTERPRETER: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+fn current_interpreter() -> i64 {
+    // SAFETY: called with an attached thread state, so there is a current interpreter.
+    unsafe { pyo3::ffi::PyInterpreterState_GetID(pyo3::ffi::PyInterpreterState_Get()) }
+}
+
+/// Refuses to run in an interpreter other than the one that loaded the extension.
+///
+/// CPython initialises a single-phase extension once per process and hands later
+/// (sub)interpreters a copy of its module's namespace, so those would use classes and
+/// objects that belong to the first interpreter, which breaks in confusing ways and can
+/// crash. The package calls this first thing, so that such an import fails cleanly.
+#[pyfunction]
+fn _check_interpreter() -> PyResult<()> {
+    let home = *HOME_INTERPRETER.get_or_init(current_interpreter);
+    if current_interpreter() == home {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyImportError::new_err(
+            "openapi_spec_validator_rs can only be used in one interpreter per process: it \
+             was first imported in another (sub)interpreter",
+        ))
+    }
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let _ = HOME_INTERPRETER.get_or_init(current_interpreter);
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add_function(wrap_pyfunction!(_check_interpreter, m)?)?;
     m.add_class::<CoreError>()?;
     m.add_function(wrap_pyfunction!(validate, m)?)?;
     m.add_function(wrap_pyfunction!(validate_bytes, m)?)?;

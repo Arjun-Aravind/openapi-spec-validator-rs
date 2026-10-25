@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
-    ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, TextErrors, ValidationError,
-    best_match, load_text, read_until_unreadable, validate, validate_path,
+    ContextHandle, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, TextErrors,
+    ValidationError, best_match, load_text, read_text_until_unreadable, validate, validate_path,
 };
 use rayon::prelude::*;
 
@@ -133,12 +133,16 @@ fn execute(
         .stack_size(WORKER_STACK_SIZE)
         .build()
     {
-        Ok(pool) => pool.install(|| {
-            args.files
-                .par_iter()
-                .map(|file| validate_file(file, &options, stdin))
-                .collect()
-        }),
+        Ok(pool) => {
+            // The caller's validation settings (cancellation) apply in the pool too.
+            let context = ContextHandle::capture();
+            pool.install(|| {
+                args.files
+                    .par_iter()
+                    .map(|file| context.install(|| validate_file(file, &options, stdin)))
+                    .collect()
+            })
+        }
         // No thread can be started (a process limit is reached): validate the files one
         // after another on this thread, never through rayon's global pool, which could not
         // start its threads either.
@@ -217,7 +221,7 @@ fn validate_file(
         let mut stdin = stdin
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let result = read_until_unreadable(&mut **stdin, &mut bytes)
+        let result = read_text_until_unreadable(&mut **stdin, &mut bytes)
             .map_err(|error| LoadError {
                 message: error.to_string(),
             })

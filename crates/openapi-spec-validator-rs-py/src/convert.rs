@@ -1,9 +1,11 @@
 //! Conversion between Python objects and [`serde_json::Value`].
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use openapi_spec_validator_rs::pyrepr::{self, Foreign, PathItem};
-use pyo3::exceptions::{PyRecursionError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyRecursionError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
 use serde_json::{Map, Number, Value};
@@ -13,27 +15,47 @@ use serde_json::{Map, Number, Value};
 /// within the stack.
 const MAX_DEPTH: usize = 9989;
 
-/// The Python objects a converted document stands in for (see [`pyrepr::foreign`]), by
-/// what their stand-ins record, so that [`to_python`] can hand the objects themselves back
-/// (an error's `instance` is the `datetime.date` from the document, as upstream's is).
+/// The Python objects a converted document stands in for (see [`pyrepr::foreign`]), so
+/// that [`to_python`] can hand the objects themselves back (an error's `instance` is the
+/// `datetime.date` from the document, as upstream's is), and the exceptions their
+/// `repr()` or `str()` raised.
 #[derive(Default)]
 pub struct PythonObjects {
-    by_description: HashMap<(String, String, String), Py<PyAny>>,
+    /// By a hash of what their stand-ins record; objects described alike are alike to
+    /// the validator (equal stand-ins), and the first one seen represents them all.
+    by_description: HashMap<u64, Py<PyAny>>,
+    /// The exceptions raised while describing objects, by the marker that took the
+    /// place of the text (see [`PythonObjects::raised_for`]).
+    failures: Vec<(String, PyErr)>,
 }
 
 impl PythonObjects {
-    fn key(object: Foreign<'_>) -> (String, String, String) {
-        (
-            object.type_name.to_owned(),
-            object.repr.to_owned(),
-            object.str.to_owned(),
-        )
+    fn key(object: Foreign<'_>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (object.type_name, object.repr, object.str).hash(&mut hasher);
+        hasher.finish()
     }
 
     fn get(&self, object: Foreign<'_>) -> Option<&Py<PyAny>> {
         self.by_description.get(&Self::key(object))
     }
+
+    /// The exception to raise for `text` (a message or rendering), if it includes the
+    /// `repr()` or `str()` of an object that raised when asked for it: upstream asks for
+    /// that text exactly when it builds such a message, and the exception propagates.
+    pub fn raised_for(&self, py: Python<'_>, text: &str) -> Option<PyErr> {
+        if !text.contains(FAILURE_MARKER) {
+            return None;
+        }
+        self.failures
+            .iter()
+            .find(|(marker, _)| text.contains(marker.as_str()))
+            .map(|(_, error)| error.clone_ref(py))
+    }
 }
+
+/// Begins the text standing in for a `repr()` or `str()` that raised.
+const FAILURE_MARKER: &str = "\u{0}raised:";
 
 /// Converts a spec given as Python objects, with the objects its result stands in for.
 ///
@@ -46,24 +68,112 @@ impl PythonObjects {
 /// type, as upstream does. Anything else raises: `TypeError` for other numbers
 /// (`Decimal`, `Fraction`, ...) and non-`str` keys, `ValueError` for circular
 /// references, `RecursionError` beyond [`MAX_DEPTH`].
+///
+/// The objects are described (`repr()`, `str()`) only once the whole document has been
+/// read, so that code they run cannot change the document while it is being read. A
+/// description that raises is recorded instead (see [`PythonObjects::raised_for`]).
 pub fn to_value(obj: &Bound<'_, PyAny>) -> PyResult<(Value, PythonObjects)> {
     let mut converter = Converter {
         active: HashSet::new(),
-        objects: PythonObjects::default(),
+        pending: Vec::new(),
         number_type: None,
     };
-    let value = converter
+    let mut value = converter
         .convert(obj, 0)
         .map_err(|failure| failure.into_err())?;
-    Ok((value, converter.objects))
+    let mut objects = PythonObjects::default();
+    if !converter.pending.is_empty() {
+        let described = converter
+            .pending
+            .iter()
+            .enumerate()
+            .map(|(index, object)| describe(object.bind(obj.py()), index, &mut objects))
+            .collect::<Vec<_>>();
+        fill_in(&mut value, &described);
+        for (object, description) in converter.pending.into_iter().zip(&described) {
+            if let Some(described) = pyrepr::foreign(description) {
+                objects
+                    .by_description
+                    .entry(PythonObjects::key(described))
+                    .or_insert(object);
+            }
+        }
+    }
+    Ok((value, objects))
 }
 
 struct Converter {
     /// Containers on the current path, by address, to detect cycles.
     active: HashSet<usize>,
-    objects: PythonObjects,
+    /// Objects JSON has no counterpart for, in the order they were met; the document
+    /// holds a placeholder for each until [`fill_in`] replaces it.
+    pending: Vec<Py<PyAny>>,
     /// `numbers.Number`, imported on first use.
     number_type: Option<Py<PyType>>,
+}
+
+/// The key of a placeholder for the `n`th pending object (see [`Converter::pending`]).
+const PLACEHOLDER_KEY: &str = "\u{0}pending python object";
+
+/// The stand-in for `object`, the `index`th object met; a `repr()` or `str()` that
+/// raises is recorded in `objects` and replaced by a marker.
+fn describe(object: &Bound<'_, PyAny>, index: usize, objects: &mut PythonObjects) -> Value {
+    let mut text = |result: PyResult<Bound<'_, PyString>>, what: &str| match result
+        .and_then(|text| Ok(text.to_str()?.to_owned()))
+    {
+        Ok(text) => text,
+        Err(error) => {
+            let marker = format!("{FAILURE_MARKER}{what}:{index}\u{0}");
+            objects.failures.push((marker.clone(), error));
+            marker
+        }
+    };
+    let class = object.get_type();
+    let type_name = tp_name(&class);
+    let class_repr = text(class.repr(), "class");
+    let repr = text(object.repr(), "repr");
+    let str = text(object.str(), "str");
+    pyrepr::foreign_value(&type_name, &class_repr, &repr, &str)
+}
+
+/// `tp_name`, as C-level messages print a type: a heap type (a class defined in Python)
+/// by its `__name__`, a static type by its module-qualified name, except in `builtins`.
+fn tp_name(class: &Bound<'_, PyType>) -> String {
+    // SAFETY: `as_type_ptr` is a valid type object pointer.
+    let flags = unsafe { pyo3::ffi::PyType_GetFlags(class.as_type_ptr()) };
+    let name = |r: PyResult<Bound<'_, PyString>>| r.map(|n| n.to_string()).unwrap_or_default();
+    if flags & pyo3::ffi::Py_TPFLAGS_HEAPTYPE != 0 {
+        return name(class.name());
+    }
+    let module = name(class.module());
+    let qualname = name(class.qualname());
+    if module == "builtins" || module.is_empty() {
+        qualname
+    } else {
+        format!("{module}.{qualname}")
+    }
+}
+
+/// Replaces every placeholder in `value` with the stand-in described for it.
+fn fill_in(value: &mut Value, described: &[Value]) {
+    match value {
+        Value::Object(map) => {
+            if let Some(index) = map
+                .get(PLACEHOLDER_KEY)
+                .and_then(Value::as_u64)
+                .filter(|_| map.len() == 1)
+                .and_then(|index| usize::try_from(index).ok())
+            {
+                if let Some(stand_in) = described.get(index) {
+                    *value = stand_in.clone();
+                }
+                return;
+            }
+            map.values_mut().for_each(|child| fill_in(child, described));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|child| fill_in(child, described)),
+        _ => {}
+    }
 }
 
 /// A conversion failure; its location is collected in reverse while unwinding so that the
@@ -137,8 +247,32 @@ impl Converter {
         }
         if let Ok(dict) = obj.cast::<PyDict>() {
             let id = self.enter(obj, depth)?;
-            let mut map = Map::with_capacity(dict.len());
-            for (key, value) in dict.iter() {
+            let size = dict.len();
+            let mut map = Map::with_capacity(size);
+            let mut position: pyo3::ffi::Py_ssize_t = 0;
+            loop {
+                // `PyDict_Next` rather than PyO3's iterator, which panics when the dict
+                // changes size; code run while converting (a `__class__` property, say)
+                // can change it, and Python raises `RuntimeError` then.
+                let mut key_ptr = std::ptr::null_mut();
+                let mut value_ptr = std::ptr::null_mut();
+                // SAFETY: `dict` is a dict; the borrowed references are turned into
+                // owned ones at once, before any Python code can run.
+                let (key, value) = unsafe {
+                    if pyo3::ffi::PyDict_Next(
+                        dict.as_ptr(),
+                        &mut position,
+                        &mut key_ptr,
+                        &mut value_ptr,
+                    ) == 0
+                    {
+                        break;
+                    }
+                    (
+                        Bound::from_borrowed_ptr(obj.py(), key_ptr),
+                        Bound::from_borrowed_ptr(obj.py(), value_ptr),
+                    )
+                };
                 let Ok(key) = key.cast::<PyString>() else {
                     let repr = key.repr().map(|r| r.to_string()).unwrap_or_default();
                     return Err(Failure::new(FailureKind::NonStringKey {
@@ -151,6 +285,11 @@ impl Converter {
                     .convert(&value, depth + 1)
                     .map_err(|failure| failure.at(PathItem::Key(key.to_owned())))?;
                 map.insert(key.to_owned(), value);
+                if dict.len() != size {
+                    return Err(Failure::new(FailureKind::Python(PyRuntimeError::new_err(
+                        "dictionary changed size during iteration",
+                    ))));
+                }
             }
             self.active.remove(&id);
             return Ok(Value::Object(map));
@@ -208,37 +347,14 @@ impl Converter {
         obj.is_instance(number)
     }
 
-    /// The stand-in for an object of a type JSON has no counterpart for.
+    /// A placeholder for an object of a type JSON has no counterpart for, described
+    /// once the whole document has been read (see [`to_value`]).
     fn foreign(&mut self, obj: &Bound<'_, PyAny>) -> Result<Value, Failure> {
-        let class = obj.get_type();
-        // `tp_name`, as C-level messages print the type: a heap type (a class defined in
-        // Python) by its `__name__`, a static type by its module-qualified name, except
-        // in `builtins`.
-        // SAFETY: `as_type_ptr` is a valid type object pointer.
-        let flags = unsafe { pyo3::ffi::PyType_GetFlags(class.as_type_ptr()) };
-        let type_name = if flags & pyo3::ffi::Py_TPFLAGS_HEAPTYPE != 0 {
-            class.name()?.to_string()
-        } else {
-            let module = class.module()?.to_string();
-            let qualname = class.qualname()?.to_string();
-            if module == "builtins" {
-                qualname
-            } else {
-                format!("{module}.{qualname}")
-            }
-        };
-        let class_repr = class.repr()?.to_string();
-        let repr = obj.repr()?.to_string();
-        let str = obj.str()?.to_string();
-        let value = pyrepr::foreign_value(&type_name, &class_repr, &repr, &str);
-        let described = pyrepr::foreign(&value).expect("built by foreign_value");
-        // Objects described alike are alike to the validator (equal stand-ins); the first
-        // one seen represents them all.
-        self.objects
-            .by_description
-            .entry(PythonObjects::key(described))
-            .or_insert_with(|| obj.clone().unbind());
-        Ok(value)
+        let index = self.pending.len();
+        self.pending.push(obj.clone().unbind());
+        let mut map = Map::with_capacity(1);
+        map.insert(PLACEHOLDER_KEY.to_owned(), Value::from(index));
+        Ok(Value::Object(map))
     }
 
     fn array<'py>(

@@ -41,7 +41,7 @@ mod text_input;
 
 use serde_json::Value;
 
-pub use stream::read_until_unreadable;
+pub use stream::{read_text_until_unreadable, read_until_unreadable};
 pub use text_input::TextErrors;
 
 /// A read failure, carrying the text upstream's CLI prints (it prints `str(exc)` and exits 1).

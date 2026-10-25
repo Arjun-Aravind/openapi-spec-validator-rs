@@ -3,30 +3,50 @@
 //! PyYAML parses a stream as it reads it, so a document that libyaml cannot even decode
 //! fails at the first offending bytes, however much follows them: upstream's handlers
 //! give up on `/dev/zero` after one buffer. The bytes libyaml rejects while decoding (a
-//! sequence that is not UTF-8, or a character YAML does not allow) end the document as
-//! far as the parser is concerned: nothing after them can change the outcome, since the
-//! scanner never gets past them. Reading stops there, so that such a stream never has to
-//! fit in memory. Everything else is read whole.
+//! sequence that is not UTF-8 or UTF-16, or a character YAML does not allow) end the
+//! document as far as the parser is concerned: nothing after them can change the
+//! outcome, since the scanner never gets past them. Reading stops there, so that such a
+//! stream never has to fit in memory. Everything else is read whole.
 
 use std::io::{self, ErrorKind, Read};
 
 /// How much is read at a time.
 const CHUNK_SIZE: usize = 64 * 1024;
 
-/// Appends the content of `reader` to `into` up to its end, or up to and including the
-/// first bytes libyaml would refuse to decode (see the module documentation).
-///
-/// Streams in UTF-16 (declared by a byte-order mark) are read whole: their encoding
-/// checks are not modelled here.
+/// Appends the content of `reader` (a binary stream) to `into` up to its end, or up to
+/// and including the first bytes libyaml would refuse to decode (see the module
+/// documentation). The encoding is detected as libyaml detects it: UTF-16 after a
+/// byte-order mark, UTF-8 otherwise.
 pub fn read_until_unreadable(reader: &mut dyn Read, into: &mut Vec<u8>) -> io::Result<()> {
+    read(reader, into, false)
+}
+
+/// [`read_until_unreadable`] for the bytes behind a text stream (`sys.stdin`), which
+/// Python decodes as UTF-8 before PyYAML sees them: a byte-order mark is no reason to
+/// read UTF-16.
+pub fn read_text_until_unreadable(reader: &mut dyn Read, into: &mut Vec<u8>) -> io::Result<()> {
+    read(reader, into, true)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+}
+
+fn read(reader: &mut dyn Read, into: &mut Vec<u8>, text: bool) -> io::Result<()> {
     let start = into.len();
     // Bytes from `start` on that are known to be clean; what follows them is at most an
-    // incomplete UTF-8 sequence waiting for its continuation bytes.
+    // incomplete character waiting for the rest of its bytes.
     let mut checked = start;
-    let mut utf16 = None;
+    let mut encoding = text.then_some(Encoding::Utf8);
     loop {
+        crate::context::check();
         // Read straight into the buffer's spare room.
         let len = into.len();
+        into.try_reserve(CHUNK_SIZE)
+            .map_err(|_| io::Error::new(ErrorKind::OutOfMemory, "out of memory"))?;
         into.resize(len + CHUNK_SIZE, 0);
         let read = match reader.read(&mut into[len..]) {
             Ok(0) => {
@@ -44,20 +64,69 @@ pub fn read_until_unreadable(reader: &mut dyn Read, into: &mut Vec<u8>) -> io::R
             }
         };
         into.truncate(len + read);
-        if utf16.is_none() && into.len() - start >= 2 {
-            utf16 = Some(matches!(
-                &into[start..start + 2],
-                [0xFF, 0xFE] | [0xFE, 0xFF]
-            ));
+        if encoding.is_none() && into.len() - start >= 2 {
+            // `yaml_parser_determine_encoding`; the BOM is skipped.
+            encoding = Some(match into[start..start + 2] {
+                [0xFF, 0xFE] => {
+                    checked = start + 2;
+                    Encoding::Utf16Le
+                }
+                [0xFE, 0xFF] => {
+                    checked = start + 2;
+                    Encoding::Utf16Be
+                }
+                _ => Encoding::Utf8,
+            });
         }
-        if utf16 != Some(false) {
-            continue;
-        }
-        match clean_prefix(&into[checked..]) {
+        let clean = match encoding {
+            None => continue,
+            Some(Encoding::Utf8) => clean_prefix(&into[checked..]),
+            Some(Encoding::Utf16Le) => clean_utf16_prefix(&into[checked..], u16::from_le_bytes),
+            Some(Encoding::Utf16Be) => clean_utf16_prefix(&into[checked..], u16::from_be_bytes),
+        };
+        match clean {
             Some(clean) => checked += clean,
             None => return Ok(()),
         }
     }
+}
+
+/// [`clean_prefix`] for UTF-16 (`yaml_parser_update_buffer`): a lone low surrogate, a
+/// high surrogate not followed by a low one, or a character YAML does not allow is
+/// refused; a unit or surrogate pair cut off by the end is left for later.
+fn clean_utf16_prefix(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Option<usize> {
+    let mut at = 0;
+    while at + 2 <= bytes.len() {
+        let value = unit([bytes[at], bytes[at + 1]]);
+        let (code, width) = match value & 0xFC00 {
+            0xDC00 => return None,
+            0xD800 => {
+                if at + 4 > bytes.len() {
+                    break;
+                }
+                let low = unit([bytes[at + 2], bytes[at + 3]]);
+                if low & 0xFC00 != 0xDC00 {
+                    return None;
+                }
+                (
+                    0x10000 + ((u32::from(value) & 0x3FF) << 10) + (u32::from(low) & 0x3FF),
+                    4,
+                )
+            }
+            _ => (u32::from(value), 2),
+        };
+        if !libyaml_accepts(code) {
+            return None;
+        }
+        at += width;
+    }
+    Some(at)
+}
+
+/// The characters libyaml's reader lets through: tab, line feed, carriage return,
+/// printable ASCII, NEL and the non-control Unicode ranges.
+fn libyaml_accepts(code: u32) -> bool {
+    matches!(code, 0x09 | 0x0A | 0x0D | 0x20..=0x7E | 0x85 | 0xA0..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
 }
 
 /// How many leading bytes of `bytes` libyaml decodes without complaint, leaving out an
@@ -198,18 +267,54 @@ mod tests {
         assert_eq!(read(&mut ByteByByte(b"a\xe6\x97b")), b"a\xe6\x97b");
     }
 
+    fn utf16(bom: bool, text: &str) -> Vec<u8> {
+        let units = text.encode_utf16().flat_map(u16::to_le_bytes);
+        if bom {
+            [0xFF, 0xFE].into_iter().chain(units).collect()
+        } else {
+            units.collect()
+        }
+    }
+
     #[test]
-    fn utf16_streams_are_read_whole() {
-        let text: Vec<u8> = [0xFF, 0xFE]
-            .into_iter()
-            .chain("a: 1\n".encode_utf16().flat_map(u16::to_le_bytes))
-            .collect();
-        assert_eq!(read(&mut ByteByByte(&text)), text);
-        let big: Vec<u8> = std::iter::repeat_n(text.as_slice(), 10_000)
-            .flatten()
-            .copied()
-            .collect();
+    fn utf16_streams_stop_where_libyaml_would() {
+        let clean = utf16(true, "a: 1 # \u{1F600} \u{85}\n");
+        assert_eq!(read(&mut ByteByByte(&clean)), clean);
+        let big: Vec<u8> = utf16(true, &"key: value\n".repeat(20_000));
         assert_eq!(read(&mut io::Cursor::new(&big)), big);
+        // An endless stream of NULs after the mark stops after one chunk.
+        let mut endless = Endless {
+            pattern: b"\0",
+            at: 0,
+        };
+        let mut bytes = vec![0xFF, 0xFE];
+        read_until_unreadable(&mut endless, &mut bytes).unwrap();
+        assert!(bytes.len() <= 2 + CHUNK_SIZE);
+        // Big-endian, and a lone low surrogate or an unpaired high one.
+        let be: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain("ok".encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(read(&mut ByteByByte(&be)), be);
+        assert_eq!(clean_utf16_prefix(&[0x00, 0xDC], u16::from_le_bytes), None);
+        assert_eq!(
+            clean_utf16_prefix(&[0x00, 0xD8, 0x41, 0x00], u16::from_le_bytes),
+            None
+        );
+        assert_eq!(
+            clean_utf16_prefix(&[0x41, 0x00, 0x00, 0xD8], u16::from_le_bytes),
+            Some(2)
+        );
+        assert_eq!(
+            clean_utf16_prefix(&[0x41, 0x00, 0x00], u16::from_le_bytes),
+            Some(2)
+        );
+        assert_eq!(clean_utf16_prefix(&[0x07, 0x00], u16::from_le_bytes), None);
+        // Text streams are UTF-8 whatever their first bytes: the mark is an invalid
+        // sequence there.
+        let mut bytes = Vec::new();
+        read_text_until_unreadable(&mut io::Cursor::new(&big), &mut bytes).unwrap();
+        assert!(bytes.len() < big.len());
     }
 
     #[test]

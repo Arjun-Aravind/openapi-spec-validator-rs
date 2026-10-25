@@ -148,7 +148,12 @@ impl CoreError {
         let root = Arc::clone(&self.root);
         let context_path = self.context_path.clone();
         // Rendering pretty-prints the schema and instance, which can be large and deep.
-        stack::run(py, move || Ok(resolve(&root, &context_path).to_string()))
+        let text = stack::run(py, move || Ok(resolve(&root, &context_path).to_string()))?;
+        // Rendering asks for the `repr()` of what it prints, which may have raised.
+        match self.objects.raised_for(py, &text) {
+            Some(raised) => Err(raised),
+            None => Ok(text),
+        }
     }
 
     fn __repr__(&self) -> String {

@@ -256,6 +256,7 @@ impl<'d, 'a, 'r> Evaluator<'d, 'a, 'r> {
 
 impl<'d> Evaluator<'d, '_, '_> {
     fn enter(&mut self, frames: usize) -> Result<(), Crash> {
+        crate::context::check();
         self.frames += frames;
         if self.frames > MAX_FRAMES {
             return Err(Crash::recursion());

@@ -1,8 +1,11 @@
 //! Running validator work on a thread with a known, large stack.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use openapi_spec_validator_rs::{Cancelled, run_cancellable};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -19,25 +22,41 @@ const SIGNAL_POLL: Duration = Duration::from_millis(50);
 /// returns its result. `f` may re-attach (`Python::attach`) to read or build Python objects.
 ///
 /// Meanwhile the calling thread handles signals as Python code would: the exception a
-/// signal handler raises (`KeyboardInterrupt` for Ctrl-C) is returned as soon as it
-/// arrives, as upstream's pure-Python validation is abandoned where it stands. The work
-/// then finishes on its own, unobserved, and its result is dropped.
+/// signal handler raises (`KeyboardInterrupt` for Ctrl-C, or whatever a `SIGALRM`
+/// handler raises) is returned as soon as it arrives, as upstream's pure-Python
+/// validation is abandoned where it stands. The work is cancelled then: it stops at its
+/// next check and its result is dropped.
 pub fn run<T, F>(py: Python<'_>, f: F) -> PyResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> PyResult<T> + Send + 'static,
 {
+    let cancel = Arc::new(AtomicBool::new(false));
     let (sender, mut receiver) = mpsc::channel();
-    let handle = std::thread::Builder::new()
-        .name("openapi-spec-validator-rs".to_owned())
-        .stack_size(STACK_SIZE)
-        .spawn(move || {
-            // The receiver is gone when the caller was interrupted: nobody to report to.
-            let _ = sender.send(f());
-        })
-        .map_err(|err| {
-            PyRuntimeError::new_err(format!("cannot start the validation thread: {err}"))
-        })?;
+    let handle = {
+        let cancel = Arc::clone(&cancel);
+        std::thread::Builder::new()
+            .name("openapi-spec-validator-rs".to_owned())
+            .stack_size(STACK_SIZE)
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_cancellable(cancel, f)
+                }));
+                match outcome {
+                    // The receiver is gone when the caller was interrupted: nobody to
+                    // report to.
+                    Ok(result) => {
+                        let _ = sender.send(result);
+                    }
+                    // Stopped on request: the caller has moved on.
+                    Err(payload) if payload.is::<Cancelled>() => {}
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            })
+            .map_err(|err| {
+                PyRuntimeError::new_err(format!("cannot start the validation thread: {err}"))
+            })?
+    };
     loop {
         // The receiver travels into the detached closure and back: it is `Send`, not `Sync`.
         let (returned, received) = py.detach(move || {
@@ -47,7 +66,12 @@ where
         receiver = returned;
         match received {
             Ok(result) => return result,
-            Err(mpsc::RecvTimeoutError::Timeout) => py.check_signals()?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(interrupted) = py.check_signals() {
+                    cancel.store(true, Ordering::Relaxed);
+                    return Err(interrupted);
+                }
+            }
             // The thread ended without sending: it panicked, and the panic propagates.
             Err(mpsc::RecvTimeoutError::Disconnected) => match handle.join() {
                 Err(panic) => std::panic::resume_unwind(panic),

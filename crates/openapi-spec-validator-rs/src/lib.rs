@@ -28,6 +28,7 @@
 //!
 //! [openapi-spec-validator]: https://github.com/python-openapi/openapi-spec-validator
 
+mod context;
 mod document;
 pub mod error;
 mod formats;
@@ -58,11 +59,15 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::context::Context;
+pub use crate::context::{Cancelled, ContextHandle, run_cancellable};
 use crate::document::Documents;
 use crate::keywords::{Stop, Walker};
 
 pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError, best_match};
-pub use crate::loader::{LoadError, TextErrors, load, load_text, read_until_unreadable};
+pub use crate::loader::{
+    LoadError, TextErrors, load, load_text, read_text_until_unreadable, read_until_unreadable,
+};
 pub use crate::pyrepr::PathItem;
 #[cfg(feature = "http")]
 pub use crate::retrieve::HttpRetriever;
@@ -194,7 +199,8 @@ pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
     if let Ok(metadata) = file.metadata() {
-        bytes.reserve_exact(usize::try_from(metadata.len()).unwrap_or(0));
+        // Only a hint: a sparse or special file may claim far more than it holds.
+        let _ = bytes.try_reserve_exact(usize::try_from(metadata.len()).unwrap_or(0));
     }
     read_until_unreadable(&mut file, &mut bytes)?;
     Ok(bytes)
@@ -229,9 +235,11 @@ fn on_large_stack<'scope, T: Send + 'scope>(
     let work = std::sync::Arc::new(work);
     let spawned = {
         let work = std::sync::Arc::clone(&work);
+        // The validation's settings (cancellation) follow it onto the new thread.
+        let context = Context::current();
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
-            .spawn_scoped(scope, move || work())
+            .spawn_scoped(scope, move || context.install(|| work()))
     };
     match spawned {
         Ok(handle) => Running::Spawned(handle),

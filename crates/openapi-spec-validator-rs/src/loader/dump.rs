@@ -123,6 +123,7 @@ fn encode(
         Opened::Frame(f) => stack.push(f),
     }
     loop {
+        crate::context::check();
         let depth = stack.len();
         let Some(top) = stack.last_mut() else {
             return Ok(Value::Null);

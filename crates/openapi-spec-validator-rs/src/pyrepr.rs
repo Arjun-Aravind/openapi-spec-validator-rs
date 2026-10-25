@@ -16,7 +16,8 @@ use std::fmt::Write as _;
 /// The key of the single-entry object that stands for a Python object of a type JSON has no
 /// counterpart for, in a document handed to the Python bindings as objects: a `datetime.date`
 /// that `yaml.safe_load` produced for an unquoted `2020-01-01`, `bytes`, a `set`, ... The
-/// entry's value is `[type name, repr(type), repr(object), str(object)]`.
+/// entry's value is `[type name, repr(type), repr(object), str(object)]`, without the
+/// last when it equals the third.
 ///
 /// Such an object has no JSON type, so jsonschema reports it wherever a type is required,
 /// shows it with its `repr()`, and otherwise leaves it alone; the validator does the same
@@ -39,16 +40,17 @@ pub struct Foreign<'a> {
 
 /// The stand-in for a Python object (see [`FOREIGN_KEY`]).
 pub fn foreign_value(type_name: &str, class_repr: &str, repr: &str, str: &str) -> Value {
+    let mut fields = vec![
+        Value::String(type_name.to_owned()),
+        Value::String(class_repr.to_owned()),
+        Value::String(repr.to_owned()),
+    ];
+    // Most objects print the same either way (`bytes`, `set`, ...): kept once.
+    if str != repr {
+        fields.push(Value::String(str.to_owned()));
+    }
     let mut map = Map::with_capacity(1);
-    map.insert(
-        FOREIGN_KEY.to_owned(),
-        Value::Array(vec![
-            Value::String(type_name.to_owned()),
-            Value::String(class_repr.to_owned()),
-            Value::String(repr.to_owned()),
-            Value::String(str.to_owned()),
-        ]),
-    );
+    map.insert(FOREIGN_KEY.to_owned(), Value::Array(fields));
     Value::Object(map)
 }
 
@@ -64,8 +66,10 @@ pub fn foreign(value: &Value) -> Option<Foreign<'_>> {
     if key.as_bytes().first() != Some(&0) || key != FOREIGN_KEY {
         return None;
     }
-    let [type_name, class_repr, repr, str] = entry.as_array()?.as_slice() else {
-        return None;
+    let (type_name, class_repr, repr, str) = match entry.as_array()?.as_slice() {
+        [type_name, class_repr, repr] => (type_name, class_repr, repr, repr),
+        [type_name, class_repr, repr, str] => (type_name, class_repr, repr, str),
+        _ => return None,
     };
     Some(Foreign {
         type_name: type_name.as_str()?,
@@ -406,6 +410,7 @@ struct PrettyPrinter<'a> {
 impl PrettyPrinter<'_> {
     /// `PrettyPrinter._format`: use the one-line repr if it fits, else the type's `_pprint_*`.
     fn format(&mut self, value: &Value, indent: i64, allowance: i64, level: usize) {
+        crate::context::check();
         let max_width = self.width - indent - allowance;
         match value {
             // Not a dict to pprint: no `_dispatch` entry, so its repr is written whole.

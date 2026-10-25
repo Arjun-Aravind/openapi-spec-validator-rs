@@ -398,6 +398,8 @@ impl<'i> Keyword<'i> for PyType {
     }
 
     fn is_valid(&self, instance: &'i Value) -> bool {
+        // The crate's validation offers no other hook, and `type` is everywhere.
+        crate::context::check();
         type_bits(instance, self.accepted & DRAFT4 != 0) & self.accepted != 0
     }
 }

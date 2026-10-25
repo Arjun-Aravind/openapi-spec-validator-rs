@@ -250,6 +250,7 @@ impl<'a> Documents<'a> {
 
     /// Follows `$ref`s until reaching a non-reference node (`SchemaNode._resolve_node`).
     pub fn resolve<'d>(&'d self, mut node: Node<'d>) -> Result<Node<'d>, Crash> {
+        crate::context::check();
         let mut depth = 0;
         while let Some(reference) = as_ref(node.value) {
             depth += 1;

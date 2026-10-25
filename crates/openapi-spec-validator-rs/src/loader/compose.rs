@@ -105,6 +105,7 @@ fn compose_node_tree(
     // How many of the open containers the encoder counts.
     let mut depth = 0;
     loop {
+        crate::context::check();
         let (event, mark) = parser.next()?;
         let mut counted = false;
         let mut merge_list = false;

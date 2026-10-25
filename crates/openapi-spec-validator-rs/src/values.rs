@@ -148,6 +148,7 @@ struct Oas30<'d, 'a, 'r> {
 
 impl<'d> Oas30<'d, '_, '_> {
     fn enter(&mut self, frames: usize) -> Result<(), Crash> {
+        crate::context::check();
         self.frames += frames;
         if self.frames > MAX_FRAMES {
             return Err(Crash::recursion());
@@ -394,6 +395,12 @@ impl<'d> Oas30<'d, '_, '_> {
                         return Ok(());
                     }
                     errors.push(Self::error("None for not nullable".to_owned()));
+                    // A generator upstream: with the first error taken, the type name is
+                    // never checked (so `type: 'null'` only raises `UnknownType` when every
+                    // error is collected).
+                    if self.full(errors) {
+                        return Ok(());
+                    }
                 }
                 // "Pragmatic": `bytes` pass as a string with `format: binary`.
                 let binary_bytes = name == "string"
