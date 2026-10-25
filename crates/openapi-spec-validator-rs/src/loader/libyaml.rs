@@ -45,23 +45,26 @@ pub(super) enum Source<'a> {
 }
 
 pub(super) struct Parser<'a> {
-    // Boxed so the self-referential pointers libyaml keeps (read handler data, buffers) stay valid.
-    raw: Box<unsafe_yaml::yaml_parser_t>,
-    // Read through the raw pointer registered with libyaml; owned here so it outlives the parser.
-    feed: Option<Box<TextFeed<'a>>>,
+    // Heap-allocated and only ever touched through this raw pointer: libyaml's string reader
+    // keeps a pointer to the parser inside the parser itself (`read_handler_data`), which a
+    // `Box` or `&mut` reborrow would invalidate under Rust's aliasing rules. Freed in `drop`.
+    raw: *mut unsafe_yaml::yaml_parser_t,
+    // The read handler's data, registered with libyaml and read through that pointer only;
+    // owned here so it outlives the parser. Freed in `drop`.
+    feed: Option<*mut TextFeed<'a>>,
     stream_name: &'a str,
     _input: PhantomData<&'a [u8]>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(source: Source<'a>, stream_name: &'a str) -> Self {
-        let mut uninit = Box::<unsafe_yaml::yaml_parser_t>::new_uninit();
+        let raw = Box::into_raw(Box::<unsafe_yaml::yaml_parser_t>::new_uninit())
+            .cast::<unsafe_yaml::yaml_parser_t>();
         // SAFETY: `yaml_parser_initialize` zeroes the whole struct and allocates its buffers,
         // leaving it fully initialised. With Rust's allocator it only fails by aborting.
-        let mut raw = unsafe {
-            let _ = unsafe_yaml::yaml_parser_initialize(uninit.as_mut_ptr());
-            uninit.assume_init()
-        };
+        unsafe {
+            let _ = unsafe_yaml::yaml_parser_initialize(raw);
+        }
         let mut feed = None;
         match source {
             Source::Bytes(bytes) => {
@@ -69,25 +72,20 @@ impl<'a> Parser<'a> {
                 // parser (lifetime `'a`), and libyaml only reads `bytes.len()` bytes from it.
                 unsafe {
                     unsafe_yaml::yaml_parser_set_input_string(
-                        &mut *raw,
+                        raw,
                         bytes.as_ptr(),
                         bytes.len() as u64,
                     );
                 }
             }
             Source::Text(text) => {
-                let mut boxed = Box::new(text);
-                let data: *mut TextFeed<'a> = &mut *boxed;
-                // SAFETY: the feed is heap-allocated and owned by `self`, so `data` stays valid
-                // for as long as libyaml can call `read_handler`.
+                let data = Box::into_raw(Box::new(text));
+                // SAFETY: the feed is heap-allocated and owned by `self` (freed in `drop`), so
+                // `data` stays valid for as long as libyaml can call `read_handler`.
                 unsafe {
-                    unsafe_yaml::yaml_parser_set_input(
-                        &mut *raw,
-                        read_handler,
-                        data.cast::<c_void>(),
-                    );
+                    unsafe_yaml::yaml_parser_set_input(raw, read_handler, data.cast::<c_void>());
                 }
-                feed = Some(boxed);
+                feed = Some(data);
             }
         }
         Self {
@@ -103,8 +101,7 @@ impl<'a> Parser<'a> {
         let mut event = MaybeUninit::<unsafe_yaml::yaml_event_t>::uninit();
         // SAFETY: the parser is initialised with an input; `yaml_parser_parse` zero-fills the
         // event before doing anything else, so it is initialised whatever the outcome.
-        let failed =
-            unsafe { unsafe_yaml::yaml_parser_parse(&mut *self.raw, event.as_mut_ptr()).fail };
+        let failed = unsafe { unsafe_yaml::yaml_parser_parse(self.raw, event.as_mut_ptr()).fail };
         if failed {
             return Err(self.error());
         }
@@ -123,11 +120,13 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self) -> String {
-        if let Some(message) = self.feed.as_ref().and_then(|f| f.failure.clone()) {
+        // SAFETY: the feed is live until `drop`, and libyaml is not running.
+        if let Some(message) = self.feed.and_then(|f| unsafe { (*f).failure.clone() }) {
             // The Python exception raised inside the stream's read() propagates unchanged.
             return message;
         }
-        let p: &unsafe_yaml::yaml_parser_t = &self.raw;
+        // SAFETY: the parser is live until `drop`, and libyaml is not running.
+        let p: &unsafe_yaml::yaml_parser_t = unsafe { &*self.raw };
         // SAFETY: libyaml sets `problem`/`context` to static NUL-terminated strings or null.
         let problem = unsafe { c_str(p.problem) }.map(|problem| {
             // unsafe-libyaml fixed a typo that libyaml 0.2.5 (bundled with PyYAML) still prints.
@@ -165,8 +164,16 @@ impl<'a> Parser<'a> {
 
 impl Drop for Parser<'_> {
     fn drop(&mut self) {
-        // SAFETY: the parser was initialised in `new` and is deleted exactly once.
-        unsafe { unsafe_yaml::yaml_parser_delete(&mut *self.raw) };
+        // SAFETY: the parser was initialised in `new` and is deleted exactly once; the parser
+        // and the feed were allocated with `Box::into_raw` in `new` and are freed exactly once,
+        // after libyaml can no longer reach them.
+        unsafe {
+            unsafe_yaml::yaml_parser_delete(self.raw);
+            drop(Box::from_raw(self.raw));
+            if let Some(feed) = self.feed {
+                drop(Box::from_raw(feed));
+            }
+        }
     }
 }
 
