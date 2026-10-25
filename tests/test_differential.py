@@ -323,3 +323,63 @@ def test_python_objects(spec: Any, run: Callable[..., list[Any]]) -> None:
     expected = outcome(run, upstream, spec, "")
     actual = outcome(run, osv, spec, "")
     assert actual == expected
+
+
+def _nested_spec(version: str, depth: int) -> dict[str, Any]:
+    schema: Any = {"type": "string"}
+    for _ in range(depth):
+        schema = {"type": "object", "properties": {"p": schema}}
+    return _spec(version, components={"schemas": {"A": schema}})
+
+
+def _gives_up(mod: Any, entry: str, spec: Any, frames_above: int) -> bool:
+    """Whether validating `spec` through `entry`, called `frames_above` frames deeper
+    than this function, ends in a recursion error."""
+
+    def call() -> None:
+        if entry == "validate":
+            mod.validate(spec)
+        elif entry == "iter_errors":
+            list(mod.shortcuts.get_validator_cls(spec)(spec).iter_errors())
+        else:
+            mod.shortcuts.get_validator_cls(spec)(spec).validate()
+
+    def deeper(n: int) -> None:
+        return call() if n == 0 else deeper(n - 1)
+
+    try:
+        deeper(frames_above)
+    except RecursionError:
+        return True
+    except Exception as error:  # noqa: BLE001 - only the message matters
+        return "maximum recursion depth exceeded" in str(error)
+    return False
+
+
+@pytest.mark.parametrize(
+    ("version", "entry", "frames_above", "limit"),
+    [
+        ("3.0.3", "validate", 0, 1000),
+        ("3.0.3", "iter_errors", 23, 1000),
+        ("3.1.0", "cls.validate", 0, 1000),
+        ("3.1.0", "validate", 11, 1400),
+    ],
+)
+def test_recursion_limit_through_the_api(version: str, entry: str, frames_above: int, limit: int) -> None:
+    # Upstream recurses through the meta-schemas as deep as the document nests: where it
+    # gives up depends on the caller's stack and on sys.getrecursionlimit().
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(limit)
+    try:
+        low, high = 1, 400
+        while high - low > 1:
+            middle = (low + high) // 2
+            if _gives_up(upstream, entry, _nested_spec(version, middle), frames_above):
+                high = middle
+            else:
+                low = middle
+        assert high < 400
+        assert not _gives_up(osv, entry, _nested_spec(version, high - 1), frames_above)
+        assert _gives_up(osv, entry, _nested_spec(version, high), frames_above)
+    finally:
+        sys.setrecursionlimit(previous)

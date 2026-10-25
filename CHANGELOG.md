@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Documents nested deeper than upstream's recursion allows are reported as upstream
+  reports them, `Error: maximum recursion depth exceeded`, instead of being validated:
+  around 122 levels of nested schemas in OpenAPI 3.0, 162 in Swagger 2.0, 61 to 81 in
+  3.1 and 3.2. A model of the Python frames jsonschema's traversal uses, fitted to
+  measurements of upstream, finds where upstream gives up (counting the caller's frames
+  and `sys.getrecursionlimit()` in the Python API), and an error upstream finds before
+  getting that deep is still reported first. This also ends the quadratic growth of
+  error output on such documents: an invalid 3.0 schema 1,000 levels deep (41 KB) took
+  1.7 GB and printed 21 MB; it now fails at once, as upstream does.
 - Ctrl-C, or any exception a signal handler raises, now cancels the validation under
   way instead of leaving it running unobserved on its thread (three interrupted runs
   kept 2.5 CPU cores busy until they finished).
