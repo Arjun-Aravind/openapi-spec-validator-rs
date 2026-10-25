@@ -62,7 +62,7 @@ use crate::document::Documents;
 use crate::keywords::{Stop, Walker};
 
 pub use crate::error::{ErrorKind, Outcome, SchemaErrorDetails, ValidationError, best_match};
-pub use crate::loader::{LoadError, TextErrors, load, load_text};
+pub use crate::loader::{LoadError, TextErrors, load, load_text, read_until_unreadable};
 pub use crate::pyrepr::PathItem;
 #[cfg(feature = "http")]
 pub use crate::retrieve::HttpRetriever;
@@ -188,6 +188,18 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     }
 }
 
+/// Reads a document file as PyYAML reads the stream `urlopen` gives upstream: only as far
+/// as the parser could get (see [`read_until_unreadable`]).
+pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    if let Ok(metadata) = file.metadata() {
+        bytes.reserve_exact(usize::try_from(metadata.len()).unwrap_or(0));
+    }
+    read_until_unreadable(&mut file, &mut bytes)?;
+    Ok(bytes)
+}
+
 /// Stack size for validation threads: enough for documents nested as deeply as the
 /// loader allows (pages are only committed as they are used).
 const STACK_SIZE: usize = 256 << 20;
@@ -291,7 +303,7 @@ fn read_and_validate(path: &Path, options: &Options) -> Result<Outcome, LoadErro
         return Err(not_found());
     }
     let absolute = std::path::absolute(path).map_err(|_| not_found())?;
-    let bytes = std::fs::read(&absolute).map_err(|error| LoadError {
+    let bytes = read_file(&absolute).map_err(|error| LoadError {
         message: error.to_string(),
     })?;
     // Upstream reads files through `urlopen`, which is the stream name PyYAML reports.

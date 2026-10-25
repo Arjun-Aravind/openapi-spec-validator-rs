@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
     ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, TextErrors, ValidationError,
-    best_match, load_text, validate, validate_path,
+    best_match, load_text, read_until_unreadable, validate, validate_path,
 };
 use rayon::prelude::*;
 
@@ -127,20 +127,26 @@ fn execute(
         retriever,
     };
 
-    let validate_all = || -> Vec<FileResult> {
-        args.files
-            .par_iter()
-            .map(|file| validate_file(file, &options, stdin))
-            .collect()
-    };
     // Loading and validating recurse with the document's nesting, which the loader allows
     // up to Python's limits; run on threads whose stacks fit that in any build.
-    let results = match rayon::ThreadPoolBuilder::new()
+    let results: Vec<FileResult> = match rayon::ThreadPoolBuilder::new()
         .stack_size(WORKER_STACK_SIZE)
         .build()
     {
-        Ok(pool) => pool.install(validate_all),
-        Err(_) => validate_all(),
+        Ok(pool) => pool.install(|| {
+            args.files
+                .par_iter()
+                .map(|file| validate_file(file, &options, stdin))
+                .collect()
+        }),
+        // No thread can be started (a process limit is reached): validate the files one
+        // after another on this thread, never through rayon's global pool, which could not
+        // start its threads either.
+        Err(_) => args
+            .files
+            .iter()
+            .map(|file| validate_file(file, &options, stdin))
+            .collect(),
     };
 
     for result in results {
@@ -211,8 +217,7 @@ fn validate_file(
         let mut stdin = stdin
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let result = stdin
-            .read_to_end(&mut bytes)
+        let result = read_until_unreadable(&mut **stdin, &mut bytes)
             .map_err(|error| LoadError {
                 message: error.to_string(),
             })

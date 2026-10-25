@@ -24,8 +24,7 @@
 //! * Integers outside the 64-bit range become the `f64` that serde_json produces for the same
 //!   decimal literal (as JSON input does); beyond `f64` range they become `Value::Null`.
 //! * Error texts that embed `repr()` of user strings treat code points that are unassigned in
-//!   Unicode 15.1 as printable, and `int()`/`float()` under explicit `!!int`/`!!float` tags do
-//!   not accept non-ASCII decimal digits (Python does).
+//!   Unicode 15.1 as printable.
 //! * PyYAML's own recursion limits (deep merge-key chains, `=`-key chains) are approximated.
 
 mod bigint;
@@ -37,10 +36,12 @@ mod libyaml;
 mod pyfmt;
 mod resolve;
 mod scalars;
+mod stream;
 mod text_input;
 
 use serde_json::Value;
 
+pub use stream::read_until_unreadable;
 pub use text_input::TextErrors;
 
 /// A read failure, carrying the text upstream's CLI prints (it prints `str(exc)` and exits 1).

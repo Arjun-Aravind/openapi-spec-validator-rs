@@ -9,14 +9,53 @@ reaches a reference to a document, and once per document per validation.
 
 from __future__ import annotations
 
+import codecs
+import re
 from contextlib import closing
 from types import ModuleType
-from typing import Final
+from typing import IO, Final
 
-__all__ = ["retrieve"]
+__all__ = ["read_stream", "retrieve"]
 
 #: The timeout jsonschema-path's handlers pass to ``urlopen`` and ``requests.get``.
 TIMEOUT: Final = 10
+
+_CHUNK_SIZE: Final = 16 * 1024
+# What libyaml refuses to decode ("control characters are not allowed"): everything but
+# tab, line feed, carriage return, printable ASCII, NEL and the non-control Unicode ranges.
+_UNREADABLE: Final = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ufffe\uffff]")
+
+
+def read_stream(stream: IO[bytes]) -> bytes:
+    """Reads a binary stream only as far as PyYAML's reader would get.
+
+    PyYAML parses a stream as it reads it, so a document libyaml cannot even decode fails
+    at the first offending bytes, however much follows them: upstream gives up on
+    ``/dev/zero`` after one buffer. Reading stops at the first bytes libyaml would refuse
+    (a sequence that is not UTF-8, or a character YAML does not allow), which the parser
+    then meets and reports as upstream does; everything else is read whole. Streams in
+    UTF-16 (declared by a byte-order mark) are read whole.
+    """
+    data = bytearray()
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    checked = 0
+    utf16 = None
+    while chunk := stream.read(_CHUNK_SIZE):
+        data += chunk
+        if utf16 is None and len(data) >= 2:
+            utf16 = bytes(data[:2]) in (b"\xff\xfe", b"\xfe\xff")
+        if utf16 is not False:
+            continue
+        try:
+            # The decoder keeps an incomplete trailing sequence for the next chunk.
+            text = decoder.decode(data[checked:])
+        except UnicodeDecodeError:
+            break
+        checked = len(data)
+        if _UNREADABLE.search(text):
+            break
+    return bytes(data)
+
 
 _UNRESOLVED: Final = ModuleType("unresolved")
 _requests: ModuleType | None = _UNRESOLVED
@@ -55,7 +94,4 @@ def retrieve(url: str) -> bytes:
     with closing(urlopen(url, timeout=TIMEOUT)) as response:
         # Read in chunks as PyYAML reads a stream: a body cut short by the server is
         # used as far as it goes, where `read()` would raise `IncompleteRead`.
-        chunks = []
-        while chunk := response.read(16384):
-            chunks.append(chunk)
-        return b"".join(chunks)
+        return read_stream(response)

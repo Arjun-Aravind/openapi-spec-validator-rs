@@ -110,7 +110,7 @@ def validate_path(
         raise FileNotFoundError(f"No such file: {filename}")
     uri = Path(os.path.abspath(filename)).as_uri()
     with open(filename, "rb") as stream:
-        data = stream.read()
+        data = handlers.read_stream(stream)
     _validate_bytes(data, _FILE_STREAM_NAME, uri, cls)
 
 
@@ -173,7 +173,7 @@ def _read_url(spec_url: str) -> tuple[bytes, str]:
     with closing(urlopen(spec_url, timeout=_URL_TIMEOUT)) as response:
         # PyYAML names a stream after its `name` attribute, else `<file>`.
         stream_name = str(getattr(response, "name", "<file>"))
-        return response.read(), stream_name
+        return handlers.read_stream(response), stream_name
 
 
 def _validate_bytes(

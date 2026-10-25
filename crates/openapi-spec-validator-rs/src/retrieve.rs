@@ -57,7 +57,7 @@ pub use self::http::HttpRetriever;
 mod http {
     use std::collections::HashMap;
     use std::fmt;
-    use std::io::{ErrorKind, Read};
+    use std::io::ErrorKind;
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -268,17 +268,15 @@ mod http {
     fn read_body(
         response: &mut ureq::http::Response<ureq::Body>,
     ) -> Result<Vec<u8>, RetrieveError> {
-        // `read_to_vec` stops at 10 MB by default; `urlopen` reads everything.
+        // `read_to_vec` stops at 10 MB by default; `urlopen` reads everything, as far as
+        // PyYAML's reader gets through it.
         let mut reader = response.body_mut().with_config().limit(u64::MAX).reader();
         let mut body = Vec::new();
-        let mut chunk = [0u8; 16384];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => return Ok(body),
-                Ok(n) => body.extend_from_slice(&chunk[..n]),
-                Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(body),
-                Err(error) => return Err(RetrieveError::new(error.to_string())),
-            }
+        match crate::read_until_unreadable(&mut reader, &mut body) {
+            Ok(()) => Ok(body),
+            // A body cut short by the server is used as far as it arrived.
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(body),
+            Err(error) => Err(RetrieveError::new(error.to_string())),
         }
     }
 
