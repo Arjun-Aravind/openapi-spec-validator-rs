@@ -261,8 +261,13 @@ impl<'a> Search<'a> {
             .find(|r| r.uri.trim_end_matches('#') == uri)
     }
 
+    /// The validation root (the first resource).
+    pub(crate) fn root(&self) -> Option<&Resource<'a>> {
+        self.resources.first()
+    }
+
     /// Resolves a `$ref` relative to the resource `base`.
-    fn resolve(&self, base: &'a str, reference: &str) -> Option<(&'a Value, &'a str)> {
+    pub(crate) fn resolve(&self, base: &'a str, reference: &str) -> Option<(&'a Value, &'a str)> {
         let (uri, fragment) = reference.split_once('#').unwrap_or((reference, ""));
         let resource = if uri.is_empty() {
             self.resource(base)?
@@ -284,7 +289,11 @@ impl<'a> Search<'a> {
 
     /// Resolves a `$dynamicRef` like `#meta` to the outermost resource declaring that
     /// `$dynamicAnchor` (the validation root comes first in `resources`).
-    fn resolve_dynamic(&self, base: &'a str, reference: &str) -> Option<(&'a Value, &'a str)> {
+    pub(crate) fn resolve_dynamic(
+        &self,
+        base: &'a str,
+        reference: &str,
+    ) -> Option<(&'a Value, &'a str)> {
         let anchor = reference.strip_prefix('#')?;
         for resource in self.resources {
             if let Some(found) = find_anchor(resource.contents, anchor) {

@@ -32,6 +32,7 @@ mod context;
 mod document;
 pub mod error;
 mod formats;
+mod frames;
 mod keywords;
 mod loader;
 mod meta;
@@ -59,8 +60,10 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::context::Context;
-pub use crate::context::{Cancelled, ContextHandle, run_cancellable};
+pub use crate::context::{
+    Cancelled, ContextHandle, PythonStack, run_cancellable, with_python_stack,
+};
+use crate::context::{Context, python_stack};
 use crate::document::Documents;
 use crate::keywords::{Stop, Walker};
 
@@ -152,6 +155,28 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let base_uri = options.base_uri.as_str();
     let retriever = options.retriever.as_deref();
 
+    // Upstream's check against the meta-schema recurses as deep as the document nests,
+    // and gives up past Python's recursion limit.
+    let stack = python_stack()
+        .unwrap_or_else(|| PythonStack::command_line(options.errors == ErrorMode::All));
+    let budget = frames::Budget {
+        root: stack.spec_depth + 1,
+        limit: stack.limit,
+    };
+    let (recursion, nesting) = std::thread::scope(|scope| {
+        on_large_stack(scope, || {
+            let nesting = frames::nesting(spec);
+            (
+                document_recursion(spec, version, first_only, budget, nesting),
+                nesting,
+            )
+        })
+        .join()
+    });
+    if let Some(outcome) = recursion {
+        return outcome;
+    }
+
     // Upstream checks the whole document against the meta-schema first, then walks it.
     // The two are independent, so on large documents they run concurrently; the results
     // are combined in upstream's order.
@@ -159,7 +184,9 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
         if spec_is_large(spec) {
             let document = on_large_stack(scope, || document_errors(spec, version));
             let walk = on_large_stack(scope, || {
-                walk(spec, version, first_only, base_uri, retriever)
+                walk(
+                    spec, version, first_only, base_uri, retriever, stack, nesting,
+                )
             });
             (document.join(), walk.join())
         } else {
@@ -168,7 +195,12 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
                 if first_only && !errors.is_empty() {
                     (errors, Ok(Vec::new()))
                 } else {
-                    (errors, walk(spec, version, first_only, base_uri, retriever))
+                    (
+                        errors,
+                        walk(
+                            spec, version, first_only, base_uri, retriever, stack, nesting,
+                        ),
+                    )
                 }
             })
             .join()
@@ -204,6 +236,70 @@ pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
     }
     read_until_unreadable(&mut file, &mut bytes)?;
     Ok(bytes)
+}
+
+/// The deepest Python stack upstream's check of `spec` against a meta-schema reaches,
+/// in frames above that check's `iter_errors`, as the frame model predicts it: the
+/// document check, or with `at` (a JSON pointer) the dialect check of the schema there.
+///
+/// Not a supported API: used to fit the model to measurements of upstream.
+#[doc(hidden)]
+pub fn predicted_frames(spec: &Value, version: SpecVersion, at: Option<&str>) -> Option<usize> {
+    let (schemas, instance) = match at {
+        None => (meta::document_schemas(version), spec),
+        Some(pointer) => {
+            // The walk follows references on its way and checks the schema a reference
+            // leads to.
+            fn follow<'v>(spec: &'v Value, mut value: &'v Value) -> Option<&'v Value> {
+                for _ in 0..64 {
+                    match value.get("$ref").and_then(Value::as_str) {
+                        Some(reference) if reference.starts_with('#') => {
+                            let decoded = percent_encoding::percent_decode_str(&reference[1..])
+                                .decode_utf8_lossy()
+                                .into_owned();
+                            value = spec.pointer(&decoded)?;
+                        }
+                        _ => return Some(value),
+                    }
+                }
+                Some(value)
+            }
+            let mut target = spec;
+            for segment in pointer.split('/').skip(1) {
+                let segment = segment.replace("~1", "/").replace("~0", "~");
+                target = follow(spec, target)?;
+                target = match target {
+                    Value::Object(map) => map.get(&segment)?,
+                    Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+                    _ => return None,
+                };
+            }
+            let target = follow(spec, target)?;
+            let dialect = match version {
+                SpecVersion::V2_0 | SpecVersion::V3_0 => meta::Dialect::Draft4,
+                SpecVersion::V3_1 => meta::Dialect::Oas31,
+                SpecVersion::V3_2 => meta::Dialect::Oas32,
+            };
+            (meta::meta_check_schemas(dialect), target)
+        }
+    };
+    let budget = frames::Budget {
+        root: 0,
+        limit: usize::MAX,
+    };
+    let mut probe = frames::Probe::new(&schemas, budget, at.is_some());
+    probe.run(instance);
+    if std::env::var_os("FRAMES_DEBUG").is_some() {
+        let (schema_path, instance_path) = &probe.max_at;
+        let tail = &schema_path[schema_path.len().saturating_sub(12)..];
+        eprintln!(
+            "max {} at ...{:?} (instance depth {})",
+            probe.max,
+            tail,
+            instance_path.len()
+        );
+    }
+    Some(probe.max)
 }
 
 /// Stack size for validation threads: enough for documents nested as deeply as the
@@ -266,6 +362,43 @@ fn spec_is_large(spec: &Value) -> bool {
     budget == 0
 }
 
+/// The outcome when upstream's check of `spec` against its meta-schema exceeds the
+/// recursion limit: `RecursionError`, unless that check yields an error first and only
+/// the first is wanted.
+fn document_recursion(
+    spec: &Value,
+    version: SpecVersion,
+    first_only: bool,
+    budget: frames::Budget,
+    nesting: usize,
+) -> Option<Outcome> {
+    let schemas = meta::document_schemas(version);
+    let probe = frames::find(spec, &schemas, budget, false, Some(nesting))?;
+    let crossing = probe.crossing.as_ref()?;
+    let recursion = || Outcome::Error(document::Crash::recursion().0);
+    if !first_only {
+        return Some(recursion());
+    }
+    // The rest of the document, without what lies beyond the limit, may hold an error
+    // that upstream reports before it gets that deep.
+    let pruned = frames::pruned(spec, &probe.prune);
+    let first = document_errors(&pruned, version).into_iter().find(|error| {
+        let inside = error.schema_error.as_deref().is_some_and(|details| {
+            probe.prune.iter().any(|location| {
+                details.instance_path.len() > location.len()
+                    && details.instance_path.starts_with(location)
+            })
+        });
+        !inside
+    });
+    Some(match first {
+        Some(error) if frames::precedes(&schemas, spec, &error, crossing) => {
+            Outcome::Invalid(vec![error])
+        }
+        _ => recursion(),
+    })
+}
+
 /// Errors from validating the whole document against the version's meta-schema.
 fn document_errors(spec: &Value, version: SpecVersion) -> Vec<ValidationError> {
     let validator = meta::document_validator(version);
@@ -286,9 +419,11 @@ fn walk(
     first_only: bool,
     base_uri: &str,
     retriever: Option<&dyn Retrieve>,
+    stack: PythonStack,
+    nesting: usize,
 ) -> Result<Vec<ValidationError>, String> {
     let docs = Documents::new(spec, base_uri, retriever);
-    let mut walker = Walker::new(&docs, version, first_only);
+    let mut walker = Walker::new(&docs, version, first_only, stack, nesting);
     match walker.root(docs.root()) {
         Err(Stop::Crash(message)) => Err(message),
         Ok(()) | Err(Stop::Done) => Ok(walker.errors),

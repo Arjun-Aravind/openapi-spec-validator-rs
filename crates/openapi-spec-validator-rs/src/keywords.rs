@@ -57,10 +57,23 @@ pub(crate) struct Walker<'d, 'a> {
     defaults: DefaultValidator<'d, 'a>,
     /// `_collect_properties` results by schema identity.
     collected: HashMap<usize, Vec<String>>,
+    /// Python frames upstream's walk holds at this point: one per keyword validator call,
+    /// from `SpecValidator.iter_errors` on (see `crate::frames`).
+    frames: usize,
+    /// Python's recursion limit.
+    limit: usize,
+    /// How deep the document nests: no schema in it nests deeper.
+    nesting: usize,
 }
 
 impl<'d, 'a> Walker<'d, 'a> {
-    pub fn new(docs: &'d Documents<'a>, version: SpecVersion, first_only: bool) -> Self {
+    pub fn new(
+        docs: &'d Documents<'a>,
+        version: SpecVersion,
+        first_only: bool,
+        stack: crate::context::PythonStack,
+        nesting: usize,
+    ) -> Self {
         Self {
             docs,
             version,
@@ -72,7 +85,18 @@ impl<'d, 'a> Walker<'d, 'a> {
             default_dialect: None,
             defaults: DefaultValidator::new(docs, version),
             collected: HashMap::new(),
+            frames: stack.spec_depth,
+            limit: stack.limit,
+            nesting,
         }
+    }
+
+    /// A call to another keyword validator: one more frame while it runs.
+    fn nested<T>(&mut self, call: impl FnOnce(&mut Self) -> T) -> T {
+        self.frames += 1;
+        let result = call(self);
+        self.frames -= 1;
+        result
     }
 
     fn emit(&mut self, error: ValidationError) -> Step {
@@ -114,21 +138,26 @@ impl<'d, 'a> Walker<'d, 'a> {
 
     /// `RootValidator`.
     pub fn root(&mut self, spec: Node<'d>) -> Step {
+        self.nested(|walker| walker.root_validator(spec))
+    }
+
+    /// `RootValidator`.
+    fn root_validator(&mut self, spec: Node<'d>) -> Step {
         let spec = self.resolve(spec)?;
         if contains(spec, "tags") {
             let tags = self.child(spec, "tags")?;
             match self.version {
-                SpecVersion::V3_2 => self.tags_v32(tags)?,
-                _ => self.tags(tags)?,
+                SpecVersion::V3_2 => self.nested(|walker| walker.tags_v32(tags))?,
+                _ => self.nested(|walker| walker.tags(tags))?,
             }
         }
         if contains(spec, "paths") {
             let paths = self.child(spec, "paths")?;
-            self.paths(paths)?;
+            self.nested(|walker| walker.paths(paths))?;
         }
         if contains(spec, "components") {
             let components = self.child(spec, "components")?;
-            self.components(components)?;
+            self.nested(|walker| walker.components(components))?;
         }
         Ok(())
     }
@@ -152,7 +181,7 @@ impl<'d, 'a> Walker<'d, 'a> {
 
     /// `OpenAPIV32TagsValidator`: unique names, known parents, no parent cycles.
     fn tags_v32(&mut self, tags: Node<'d>) -> Step {
-        self.tags(tags)?;
+        self.nested(|walker| walker.tags(tags))?;
 
         let mut seen = HashSet::new();
         // Insertion-ordered like the Python dict.
@@ -223,7 +252,7 @@ impl<'d, 'a> Walker<'d, 'a> {
                 return Err(Stop::Crash(String::new()));
             };
             let path_item = self.resolve(path_item)?;
-            self.path(url, path_item)?;
+            self.nested(|walker| walker.path(url, path_item))?;
         }
         Ok(())
     }
@@ -233,7 +262,7 @@ impl<'d, 'a> Walker<'d, 'a> {
         let mut parameters = None;
         if contains(path_item, "parameters") {
             let node = self.child(path_item, "parameters")?;
-            self.parameters(node)?;
+            self.nested(|walker| walker.parameters(node))?;
             parameters = Some(node);
         }
         let v32 = self.version == SpecVersion::V3_2;
@@ -243,7 +272,7 @@ impl<'d, 'a> Walker<'d, 'a> {
             };
             if OPERATIONS.contains(&field) || (v32 && field == "query") {
                 let operation = self.resolve(operation)?;
-                self.operation(url, field, operation, parameters)?;
+                self.nested(|walker| walker.operation(url, field, operation, parameters))?;
             } else if v32 && field == "additionalOperations" {
                 let operations = self.resolve(operation)?;
                 for (name, operation) in self.docs.entries(operations, field)? {
@@ -251,7 +280,7 @@ impl<'d, 'a> Walker<'d, 'a> {
                         return Err(Stop::Crash(String::new()));
                     };
                     let operation = self.resolve(operation)?;
-                    self.operation(url, name, operation, parameters)?;
+                    self.nested(|walker| walker.operation(url, name, operation, parameters))?;
                 }
             }
         }
@@ -283,13 +312,13 @@ impl<'d, 'a> Walker<'d, 'a> {
 
         if contains(operation, "responses") {
             let responses = self.child(operation, "responses")?;
-            self.responses(responses)?;
+            self.nested(|walker| walker.responses(responses))?;
         }
 
         let mut names = Vec::new();
         if contains(operation, "parameters") {
             let parameters = self.child(operation, "parameters")?;
-            self.parameters(parameters)?;
+            self.nested(|walker| walker.parameters(parameters))?;
             names.extend(self.path_param_names(parameters)?);
         }
         if let Some(parameters) = path_parameters {
@@ -341,7 +370,7 @@ impl<'d, 'a> Walker<'d, 'a> {
         let mut seen: Vec<(&'d Value, &'d Value)> = Vec::new();
         for parameter in self.docs.children(parameters, "parameters")? {
             let parameter = self.resolve(parameter)?;
-            self.parameter(parameter)?;
+            self.nested(|walker| walker.parameter(parameter))?;
 
             let name = self.item(parameter, "name")?;
             let location = self.item(parameter, "in")?;
@@ -367,9 +396,18 @@ impl<'d, 'a> Walker<'d, 'a> {
 
     /// `ParameterValidator`, plus `OpenAPIV2ParameterValidator`'s `default` check.
     fn parameter(&mut self, parameter: Node<'d>) -> Step {
+        if self.version == SpecVersion::V2_0 {
+            // `OpenAPIV2ParameterValidator.__call__` runs the base validator's.
+            return self.nested(|walker| walker.parameter_validator(parameter));
+        }
+        self.parameter_validator(parameter)
+    }
+
+    /// `ParameterValidator`.
+    fn parameter_validator(&mut self, parameter: Node<'d>) -> Step {
         if contains(parameter, "schema") {
             let schema = self.child(parameter, "schema")?;
-            self.schema(schema, true, false)?;
+            self.nested(|walker| walker.schema(schema, true, false))?;
         }
         if self.version == SpecVersion::V2_0 && contains(parameter, "default") {
             let default = self.item(parameter, "default")?;
@@ -385,7 +423,7 @@ impl<'d, 'a> Walker<'d, 'a> {
                 return Err(Stop::Crash(String::new()));
             }
             let response = self.resolve(response)?;
-            self.response(response)?;
+            self.nested(|walker| walker.response(response))?;
         }
         Ok(())
     }
@@ -395,11 +433,11 @@ impl<'d, 'a> Walker<'d, 'a> {
         if self.version == SpecVersion::V2_0 {
             if contains(response, "schema") {
                 let schema = self.child(response, "schema")?;
-                self.schema(schema, true, false)?;
+                self.nested(|walker| walker.schema(schema, true, false))?;
             }
         } else if contains(response, "content") {
             let content = self.child(response, "content")?;
-            self.content(content)?;
+            self.nested(|walker| walker.content(content))?;
         }
         Ok(())
     }
@@ -411,7 +449,7 @@ impl<'d, 'a> Walker<'d, 'a> {
                 return Err(Stop::Crash(String::new()));
             }
             let media_type = self.resolve(media_type)?;
-            self.media_type(media_type)?;
+            self.nested(|walker| walker.media_type(media_type))?;
         }
         Ok(())
     }
@@ -420,7 +458,7 @@ impl<'d, 'a> Walker<'d, 'a> {
     fn media_type(&mut self, media_type: Node<'d>) -> Step {
         if contains(media_type, "schema") {
             let schema = self.child(media_type, "schema")?;
-            self.schema(schema, true, false)?;
+            self.nested(|walker| walker.schema(schema, true, false))?;
         }
         Ok(())
     }
@@ -429,7 +467,7 @@ impl<'d, 'a> Walker<'d, 'a> {
     fn components(&mut self, components: Node<'d>) -> Step {
         if contains(components, "schemas") {
             let schemas = self.child(components, "schemas")?;
-            self.schemas(schemas)?;
+            self.nested(|walker| walker.schemas(schemas))?;
         }
         Ok(())
     }
@@ -438,7 +476,7 @@ impl<'d, 'a> Walker<'d, 'a> {
     fn schemas(&mut self, schemas: Node<'d>) -> Step {
         for (_, schema) in self.docs.entries(schemas, "schemas")? {
             let schema = self.resolve(schema)?;
-            self.schema(schema, true, false)?;
+            self.nested(|walker| walker.schema(schema, true, false))?;
         }
         Ok(())
     }
@@ -475,7 +513,7 @@ impl<'d, 'a> Walker<'d, 'a> {
             let all_of = self.child(schema, "allOf")?;
             for inner in self.docs.children(all_of, "allOf")? {
                 let inner = self.resolve(inner)?;
-                self.schema(inner, false, true)?;
+                self.nested(|walker| walker.schema(inner, false, true))?;
                 nested_properties.extend(self.collect_properties(inner, &mut Vec::new())?);
             }
         }
@@ -484,21 +522,21 @@ impl<'d, 'a> Walker<'d, 'a> {
                 let list = self.child(schema, keyword)?;
                 for inner in self.docs.children(list, keyword)? {
                     let inner = self.resolve(inner)?;
-                    self.schema(inner, false, true)?;
+                    self.nested(|walker| walker.schema(inner, false, true))?;
                 }
             }
         }
         for keyword in ["not", "items"] {
             if contains(schema, keyword) {
                 let inner = self.child(schema, keyword)?;
-                self.schema(inner, false, true)?;
+                self.nested(|walker| walker.schema(inner, false, true))?;
             }
         }
         if contains(schema, "properties") {
             let properties = self.child(schema, "properties")?;
             for (_, property) in self.docs.entries(properties, "properties")? {
                 let property = self.resolve(property)?;
-                self.schema(property, false, true)?;
+                self.nested(|walker| walker.schema(property, false, true))?;
             }
         }
 
@@ -630,6 +668,17 @@ impl<'d, 'a> Walker<'d, 'a> {
             }
         };
         let validator = meta::meta_check_validator(dialect, formats);
+        // `_validate_schema_meta`, `check_openapi_schema`, then the check's `iter_errors`.
+        let budget = crate::frames::Budget {
+            root: self.frames + 3,
+            limit: self.limit,
+        };
+        let schemas = meta::meta_check_schemas(dialect);
+        // A schema from this document nests no deeper than the document.
+        let nesting = (schema.doc == 0).then_some(self.nesting);
+        if let Some(probe) = crate::frames::find(schema.value, &schemas, budget, true, nesting) {
+            return self.recursion_in_check(schema.value, validator, &schemas, &probe);
+        }
         if validator.is_valid(schema.value) {
             return Ok(None);
         }
@@ -645,6 +694,42 @@ impl<'d, 'a> Walker<'d, 'a> {
             return Err(Stop::Crash(message.to_owned()));
         }
         Ok(error)
+    }
+
+    /// A dialect check that exceeds the recursion limit at `probe`'s crossing: the first
+    /// error, if Python's lazy check yields it before getting that deep, else
+    /// `RecursionError`.
+    fn recursion_in_check(
+        &self,
+        schema: &Value,
+        validator: &jsonschema::Validator,
+        schemas: &meta::Schemas<'_>,
+        probe: &crate::frames::Probe<'_>,
+    ) -> Result<Option<ValidationError>, Stop> {
+        let recursion = || Stop::Crash(Crash::recursion().0);
+        let Some(crossing) = probe.crossing.as_ref() else {
+            return Err(recursion());
+        };
+        let pruned = crate::frames::pruned(schema, &probe.prune);
+        let first = meta::convert_errors(validator.iter_errors(&pruned), schemas, &pruned)
+            .into_iter()
+            .find(|error| {
+                !error.schema_error.as_deref().is_some_and(|details| {
+                    probe.prune.iter().any(|location| {
+                        details.instance_path.len() > location.len()
+                            && details.instance_path.starts_with(location)
+                    })
+                })
+            });
+        match first {
+            Some(error) if crate::frames::precedes(schemas, schema, &error, crossing) => {
+                if let Some(message) = meta::crash_message(&error) {
+                    return Err(Stop::Crash(message.to_owned()));
+                }
+                Ok(Some(error))
+            }
+            _ => Err(recursion()),
+        }
     }
 
     /// The spec's `jsonSchemaDialect`, or the version's default dialect.

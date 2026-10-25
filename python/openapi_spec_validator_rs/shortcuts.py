@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlparse
 
-from openapi_spec_validator_rs import _core, handlers
+from openapi_spec_validator_rs import _core, _stack, handlers
 from openapi_spec_validator_rs.exceptions import (
     OpenAPIVersionNotFound,
     ValidatorDetectError,
@@ -184,7 +184,14 @@ def _validate_bytes(
         version = f"{cls.spec_version.major}.{cls.spec_version.minor}"
     try:
         errors = _core.validate_bytes(
-            data, stream_name, base_uri, version, False, handlers.retrieve
+            data,
+            stream_name,
+            base_uri,
+            version,
+            False,
+            handlers.retrieve,
+            _stack.spec_depth(),
+            _stack.limit(),
         )
     except TypeError:
         # Version detection failed on a malformed document. Detect again in Python so

@@ -42,6 +42,8 @@ def validate(
     base_uri: str,
     all_errors: bool,
     retriever: Retriever | None = None,
+    python_depth: int | None = None,
+    recursion_limit: int | None = None,
 ) -> list[CoreError]: ...
 def validate_bytes(
     data: bytes,
@@ -50,6 +52,8 @@ def validate_bytes(
     version: str | None,
     all_errors: bool,
     retriever: Retriever | None = None,
+    python_depth: int | None = None,
+    recursion_limit: int | None = None,
 ) -> list[CoreError]: ...
 def load(data: bytes, stream_name: str) -> Any: ...
 def cli_main(

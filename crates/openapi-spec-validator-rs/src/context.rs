@@ -19,6 +19,43 @@ pub struct Cancelled;
 #[derive(Clone, Default)]
 pub(crate) struct Context {
     cancel: Option<Arc<AtomicBool>>,
+    stack: Option<PythonStack>,
+}
+
+/// Where upstream's validation would sit on the Python stack: the depth of
+/// `SpecValidator.iter_errors` (the outermost frame counts 1) and the recursion limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PythonStack {
+    pub spec_depth: usize,
+    pub limit: usize,
+}
+
+impl PythonStack {
+    /// Upstream's console script (`openapi-spec-validator`) with Python's default limit:
+    /// it calls `validate()` for the first error, but `iter_errors()` itself, two frames
+    /// shallower, with `--validation-errors all`.
+    pub fn command_line(all_errors: bool) -> Self {
+        Self {
+            spec_depth: crate::frames::CLI_SPEC_DEPTH - 2 * usize::from(all_errors),
+            limit: crate::frames::DEFAULT_LIMIT,
+        }
+    }
+}
+
+/// Runs `f` as if upstream's validation sat at `stack` on the Python stack, which decides
+/// where it would exceed the recursion limit (by default: upstream's command line).
+///
+/// Not a supported API: used by the Python bindings.
+#[doc(hidden)]
+pub fn with_python_stack<T>(stack: PythonStack, f: impl FnOnce() -> T) -> T {
+    let mut context = Context::current();
+    context.stack = Some(stack);
+    context.install(f)
+}
+
+/// The Python stack position of the current validation, if the caller gave one.
+pub(crate) fn python_stack() -> Option<PythonStack> {
+    CURRENT.with(|current| current.borrow().stack)
 }
 
 thread_local! {
@@ -54,10 +91,9 @@ impl Context {
 /// Not a supported API: used by the Python bindings.
 #[doc(hidden)]
 pub fn run_cancellable<T>(cancel: Arc<AtomicBool>, f: impl FnOnce() -> T) -> T {
-    Context {
-        cancel: Some(cancel),
-    }
-    .install(f)
+    let mut context = Context::current();
+    context.cancel = Some(cancel);
+    context.install(f)
 }
 
 /// The calling thread's validation context, to carry into threads started outside the

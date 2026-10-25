@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use openapi_spec_validator_rs::{
-    DetectError, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, ValidationError,
-    detect_version,
+    DetectError, ErrorMode, LoadError, Options, Outcome, PythonStack, Retrieve, SpecVersion,
+    ValidationError, detect_version, with_python_stack,
 };
 use openapi_spec_validator_rs_cli::Args;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -84,6 +84,16 @@ fn check_interrupt(retriever: Option<&Arc<PyRetriever>>) -> PyResult<()> {
     }
 }
 
+/// Where the caller's validation sits on the Python stack (see `_stack.py`); upstream's
+/// command line's position when not given.
+fn python_stack(depth: Option<usize>, limit: Option<usize>, all_errors: bool) -> PythonStack {
+    let command_line = PythonStack::command_line(all_errors);
+    PythonStack {
+        spec_depth: depth.unwrap_or(command_line.spec_depth),
+        limit: limit.unwrap_or(command_line.limit),
+    }
+}
+
 /// Validation errors in upstream order; a non-validation failure (unresolvable `$ref`,
 /// recursion, ...) raises `ValidationAbortedError`.
 fn into_errors(
@@ -127,7 +137,8 @@ fn raised_in(py: Python<'_>, error: &ValidationError, objects: &PythonObjects) -
 /// Validates a spec given as Python objects, as the given version (`"2.0"`, `"3.0"`,
 /// `"3.1"` or `"3.2"`). `retriever` fetches `http(s)://` `$ref` targets.
 #[pyfunction]
-#[pyo3(signature = (spec, version, base_uri, all_errors, retriever=None))]
+#[pyo3(signature = (spec, version, base_uri, all_errors, retriever=None, python_depth=None, recursion_limit=None))]
+#[allow(clippy::too_many_arguments)]
 fn validate(
     py: Python<'_>,
     spec: &Bound<'_, PyAny>,
@@ -135,7 +146,10 @@ fn validate(
     base_uri: String,
     all_errors: bool,
     retriever: Option<Py<PyAny>>,
+    python_depth: Option<usize>,
+    recursion_limit: Option<usize>,
 ) -> PyResult<Vec<CoreError>> {
+    let stack = python_stack(python_depth, recursion_limit, all_errors);
     let retriever = self::retriever(retriever);
     let options = options(
         parse_version(version)?,
@@ -146,7 +160,9 @@ fn validate(
     let spec = spec.clone().unbind();
     let (outcome, objects) = stack::run(py, move || {
         let (value, objects) = Python::attach(|py| to_value(spec.bind(py)))?;
-        let outcome = openapi_spec_validator_rs::validate(&value, &options);
+        let outcome = with_python_stack(stack, || {
+            openapi_spec_validator_rs::validate(&value, &options)
+        });
         // Freeing a large document takes a while too: do it before re-attaching.
         drop(value);
         Ok((outcome, objects))
@@ -163,7 +179,8 @@ enum BytesFailure {
 /// Parses a document read from a binary stream named `stream_name` (as upstream's
 /// reader does) and validates it, detecting the version unless one is given.
 #[pyfunction]
-#[pyo3(signature = (data, stream_name, base_uri, version, all_errors, retriever=None))]
+#[pyo3(signature = (data, stream_name, base_uri, version, all_errors, retriever=None, python_depth=None, recursion_limit=None))]
+#[allow(clippy::too_many_arguments)]
 fn validate_bytes(
     py: Python<'_>,
     data: PyBackedBytes,
@@ -172,19 +189,24 @@ fn validate_bytes(
     version: Option<&str>,
     all_errors: bool,
     retriever: Option<Py<PyAny>>,
+    python_depth: Option<usize>,
+    recursion_limit: Option<usize>,
 ) -> PyResult<Vec<CoreError>> {
+    let stack = python_stack(python_depth, recursion_limit, all_errors);
     let version = version.map(parse_version).transpose()?;
     let retriever = self::retriever(retriever);
     let worker_retriever = retriever.clone();
     let result = stack::run(py, move || {
-        Ok(load_and_validate(
-            &data,
-            &stream_name,
-            version,
-            base_uri,
-            all_errors,
-            worker_retriever.as_ref(),
-        ))
+        Ok(with_python_stack(stack, || {
+            load_and_validate(
+                &data,
+                &stream_name,
+                version,
+                base_uri,
+                all_errors,
+                worker_retriever.as_ref(),
+            )
+        }))
     })?;
     check_interrupt(retriever.as_ref())?;
     match result {

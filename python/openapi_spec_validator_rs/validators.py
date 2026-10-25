@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Iterator, Mapping
 from typing import Any, ClassVar
 
-from openapi_spec_validator_rs import _core, handlers
+from openapi_spec_validator_rs import _core, _stack, handlers
 from openapi_spec_validator_rs.exceptions import OpenAPIValidationError, _from_core
 from openapi_spec_validator_rs.versions import (
     OPENAPIV2,
@@ -88,6 +88,8 @@ class SpecValidator:
             self.base_uri,
             all_errors,
             handlers.retrieve,
+            _stack.spec_depth(),
+            _stack.limit(),
         )
         return [_from_core(error) for error in errors]
 
