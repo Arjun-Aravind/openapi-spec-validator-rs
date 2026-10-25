@@ -848,7 +848,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openapi-spec-validator-rs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "fancy-regex",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "openapi-spec-validator-rs-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "insta",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "openapi-spec-validator-rs-py"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "mimalloc",
