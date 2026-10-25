@@ -109,14 +109,14 @@ reasons in `tests/upstream_shim/upstream_suite.py`; they are the differences bel
 |---|---|
 | `validate(spec, base_uri="", cls=None)` | Same |
 | `validate_url(spec_url, cls=None)` | Same: fetched with `urllib.request.urlopen` (`http`, `https`, `file`) and parsed exactly as upstream parses it, reading only as far as PyYAML would (a stream libyaml cannot decode, `/dev/zero` say, is given up on at its first bad bytes rather than read to the end). `cls` only selects the version. |
-| `$ref`s to other documents | Same: files are read from disk and `http(s)://` documents are fetched, lazily, through `openapi_spec_validator_rs.handlers`, which uses `requests` when it is importable and `urllib` otherwise, exactly as jsonschema-path's default handlers, with the URL joined as `urljoin` joins it. A `SchemaPath` passed in is read through its own base URI; custom handlers attached to it are not used. Validation runs on a thread of its own while the calling thread handles signals, so Ctrl-C (`KeyboardInterrupt`) takes effect at once, as it does upstream; the validation under way then finishes unobserved (a download within it ends or times out after 10 seconds) and its result is dropped. |
+| `$ref`s to other documents | Same: files are read from disk and `http(s)://` documents are fetched, lazily, through `openapi_spec_validator_rs.handlers`, which uses `requests` when it is importable and `urllib` otherwise, exactly as jsonschema-path's default handlers, with the URL joined as `urljoin` joins it. A `SchemaPath` passed in is read through its own base URI; custom handlers attached to it are not used. Validation runs on a thread of its own while the calling thread handles signals, so Ctrl-C (`KeyboardInterrupt`, or whatever a signal handler raises) takes effect at once, as it does upstream, and the validation under way is cancelled: it stops within milliseconds, except for a download in progress, which ends or times out (10 seconds) first. |
 | | `validate_path(path, cls=None)`: reads a file like the command line, resolving relative `$ref`s against it |
 | `validate_spec`, `validate_spec_url` (deprecated) | Same, with the same warnings (and, like upstream, `validate_spec` ignores `base_uri` unless `validator` is given) |
 | `OpenAPIV2SpecValidator`, `OpenAPIV30SpecValidator`, `OpenAPIV31SpecValidator`, `OpenAPIV32SpecValidator`, `OpenAPIV3SpecValidator` | Same constructor `(schema, base_uri="")` and `validate()`, `is_valid()`, `iter_errors()`. A jsonschema-path `SchemaPath` is accepted too. |
 | `openapi_v2_spec_validator`, `openapi_v30_spec_validator`, ... (deprecated) | Same |
 | `get_validator_cls`, `versions.get_spec_version`, `SpecVersion`, `OPENAPIV2` ... `OPENAPIV32` | Same |
 | `readers.read_from_filename`, `readers.read_from_stdin` | Same: the document (parsed like the command line's files) and its base URI |
-| Module layout: `validation.validators`, `validation.exceptions`, `validation.proxies`, `versions.consts`, `versions.datatypes`, `versions.exceptions`, `versions.shortcuts` | Same names, so an import path only changes its first segment. `validation.keywords` (the keyword validator classes), `validation.caches`, `validation.registries`, `versions.finders` and `settings` have no counterpart: the walk is implemented in Rust |
+| Module layout: `validation.validators`, `validation.exceptions`, `validation.proxies`, `validation.types`, `versions.consts`, `versions.datatypes`, `versions.exceptions`, `versions.shortcuts` | Same names, so an import path only changes its first segment. `validation.keywords` (the keyword validator classes), `validation.caches`, `validation.registries`, `versions.finders` and `settings` have no counterpart: the walk is implemented in Rust |
 | `OpenAPISpecValidatorError`, `ValidatorDetectError`, `OpenAPIValidationError`, `ExtraParametersError`, `ParameterDuplicateError`, `UnresolvableParameterError`, `DuplicateOperationIDError` | Same names and hierarchy, in `openapi_spec_validator_rs.exceptions` and at the top level |
 
 ### Exceptions
@@ -151,6 +151,9 @@ Documents are read the way `json.loads` output looks: `dict` with `str` keys, `l
 type is required (`example`, `x-` extensions, an untyped `default`) and fails wherever one
 is, with its `repr()` in the message (`datetime.date(2020, 1, 1) is not of type 'string'`);
 equal objects are equal to `enum`; and the error's `instance` is the object itself. The
+`repr()` and `str()` of such objects are taken once the whole document has been read; one
+that raises fails validation (with its own exception) only where upstream would build a
+message or rendering that includes it. The
 `TypeError` upstream raises when such an object sits where its walk expects a mapping or
 a string (`'datetime.date' object is not iterable`) is raised with the same message, as
 `ValidationAbortedError` like every other failure. Beyond that:
@@ -165,11 +168,20 @@ a string (`'datetime.date' object is not iterable`) is raised with the same mess
 | An object of another type as a schema keyword's value (`required: <date>`, `type: <date>`) | The meta-schema error; where upstream's walk then fails on it, usually the same message, not always | Depends on the keyword |
 | An empty `bytes` or `set` where upstream tests truthiness (`exclusiveMinimum: b''`), a `set` where it hashes (`enum: [{1}]`) | Treated as true and hashable | False, unhashable |
 | Circular structures | `ValueError` | Accepted where no schema applies |
+| A document changed while it is read (by a property or `__instancecheck__` it triggers) | `RuntimeError: dictionary changed size during iteration` | Depends on when |
 | `IntEnum` / `StrEnum` members | Shown in messages as their value (`1`) | Shown as the member (`<Num.ONE: 1>`) |
 | More than 9,989 nested containers | `RecursionError` | Depends on where the nesting is |
 
 ### Other differences
 
+* The package can be used in one interpreter per process: the first to import it
+  (the main interpreter or a subinterpreter, as under mod_wsgi). Another interpreter's
+  import raises `ImportError`, because CPython would hand it the first interpreter's
+  objects. Upstream, in pure Python, works in every subinterpreter.
+* Each validation reserves address space for a large thread stack (64 MiB, plus 256 MiB
+  per pass), and the allocator reserves about 1 GiB when the extension loads. Under a
+  virtual memory limit (`ulimit -v`) much below 2 GiB, validation raises `RuntimeError:
+  cannot start the validation thread`.
 * Upstream's settings (`OPENAPI_SPEC_VALIDATOR_RESOLVED_CACHE_MAXSIZE`,
   `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND`) do not apply: validation always
   follows the default `jsonschema` backend.

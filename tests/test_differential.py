@@ -288,6 +288,35 @@ PYTHON_OBJECTS = [
 ]
 
 
+# `type: 'null'` is unknown to OpenAPI 3.0's type checker, which Swagger 2.0 uses too; a
+# `null` default reports "None for not nullable" before the type is looked up.
+NULL_TYPE = [
+    pytest.param(
+        _swagger(paths={"/a": {"get": {"parameters": [{"name": "b", "in": "body", "schema": {"type": "null", "default": None}}], "responses": {"200": {"description": "ok"}}}}}),
+        id="body-20",
+    ),
+    pytest.param(
+        _swagger(paths={"/a": {"get": {"responses": {"200": {"description": "ok", "schema": {"type": "null", "default": None}}}}}}),
+        id="response-20",
+    ),
+    pytest.param(
+        _swagger(paths={"/a": {"get": {"parameters": [{"name": "q", "in": "query", "type": "null", "default": None}], "responses": {"200": {"description": "ok"}}}}}),
+        id="parameter-20",
+    ),
+    pytest.param(
+        _swagger(paths={"/a": {"get": {"responses": {"200": {"description": "ok", "schema": {"type": "null", "default": 1}}}}}}),
+        id="non-null-default-20",
+    ),
+    pytest.param(_spec("3.0.3", components={"schemas": {"A": {"type": "null", "default": None}}}), id="schema-30"),
+]
+
+
+@pytest.mark.parametrize("run", [first_error, all_errors], ids=lambda f: f.__name__)
+@pytest.mark.parametrize("spec", NULL_TYPE)
+def test_null_type(spec: Any, run: Callable[..., list[Any]]) -> None:
+    assert outcome(run, osv, spec, "") == outcome(run, upstream, spec, "")
+
+
 @pytest.mark.parametrize("run", [first_error, all_errors], ids=lambda f: f.__name__)
 @pytest.mark.parametrize("spec", PYTHON_OBJECTS)
 def test_python_objects(spec: Any, run: Callable[..., list[Any]]) -> None:

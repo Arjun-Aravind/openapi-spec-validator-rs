@@ -483,13 +483,14 @@ def _load(path: Path) -> Any:
 def test_upstream_module_layout(write, make_spec) -> None:
     # Upstream's modules, so that `openapi_spec_validator.x` becomes `openapi_spec_validator_rs.x`.
     from openapi_spec_validator_rs import readers, validation, versions
-    from openapi_spec_validator_rs.validation import exceptions, proxies, validators
+    from openapi_spec_validator_rs.validation import exceptions, proxies, types, validators
     from openapi_spec_validator_rs.versions import consts, datatypes, shortcuts
 
     assert validation.OpenAPIV31SpecValidator is osv.OpenAPIV31SpecValidator
     assert validators.OpenAPIV30SpecValidator is osv.OpenAPIV30SpecValidator
     assert exceptions.OpenAPIValidationError is osv.OpenAPIValidationError
     assert proxies.openapi_v31_spec_validator is osv.openapi_v31_spec_validator
+    assert types.SpecValidatorType is osv.validators.SpecValidatorType
     assert consts.OPENAPIV30 is OPENAPIV30
     assert datatypes.SpecVersion is versions.SpecVersion
     assert shortcuts.get_spec_version is versions.get_spec_version

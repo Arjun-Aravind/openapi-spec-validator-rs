@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Ctrl-C, or any exception a signal handler raises, now cancels the validation under
+  way instead of leaving it running unobserved on its thread (three interrupted runs
+  kept 2.5 CPU cores busy until they finished).
+- Streams that start with a UTF-16 byte-order mark are read only as far as libyaml's
+  UTF-16 decoder gets, like other streams since 0.2.2: an endless one no longer exhausts
+  memory. Standard input is checked as UTF-8, which is how Python decodes it.
+- A file that claims more bytes than memory allows (a sparse file) no longer aborts the
+  process: the size is only a hint for the buffer.
+- Swagger 2.0 (and OpenAPI 3.0) `type: 'null'` with a `null` default reports
+  `None for not nullable` again when only the first error is wanted, as upstream does;
+  0.2.2 raised `Unknown type 'null'` there, which upstream only does when collecting
+  every error.
+- A `__repr__` that changes the document no longer escapes as `PanicException`, and an
+  object whose `repr()` raises only fails validation where upstream would print it:
+  objects are described after the document has been read, and a dict changed while it
+  is read raises `RuntimeError` like Python's own iteration.
+- Importing the package in a second interpreter of the same process (a subinterpreter
+  after the main interpreter, as mod_wsgi does with several applications) raises
+  `ImportError` instead of handing it the first interpreter's objects, which broke on
+  Python 3.12 and could crash.
+
+### Added
+
+- `openapi_spec_validator_rs.validation.types`, which openapi-core imports from upstream.
+
+### Changed
+
+- The wheels are stripped of debugging symbols (about a quarter smaller), and the
+  crates.io token is only visible to the publishing step of the release workflow.
+
 ## [0.2.2] - 2026-10-25
 
 ### Added
