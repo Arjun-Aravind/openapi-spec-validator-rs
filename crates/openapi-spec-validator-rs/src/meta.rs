@@ -161,14 +161,16 @@ pub(crate) fn document_validator(version: SpecVersion) -> &'static Validator {
         .position(|v| *v == version)
         .unwrap_or_default();
     VALIDATORS[index].get_or_init(|| {
-        let mut options = jsonschema::options()
+        let type_keyword = if matches!(version, SpecVersion::V2_0 | SpecVersion::V3_0) {
+            py_type_draft4
+        } else {
+            py_type_modern
+        };
+        jsonschema::options()
             .with_registry(&OAS_REGISTRY)
             .should_validate_formats(false)
-            .with_keyword("pattern", py_pattern);
-        if matches!(version, SpecVersion::V2_0 | SpecVersion::V3_0) {
-            options = options.with_keyword("type", draft4_type);
-        }
-        options
+            .with_keyword("pattern", py_pattern)
+            .with_keyword("type", type_keyword)
             .build(document_schema(version))
             .expect("bundled document meta-schemas compile")
     })
@@ -258,36 +260,83 @@ pub(crate) fn meta_check_validator(dialect: Dialect, formats: FormatSet) -> &'st
         options = match dialect {
             Dialect::Draft4 => options
                 .with_draft(jsonschema::Draft::Draft4)
-                .with_keyword("type", draft4_type),
+                .with_keyword("type", py_type_draft4),
             Dialect::Draft6 => options.with_draft(jsonschema::Draft::Draft6),
             Dialect::Draft7 => options.with_draft(jsonschema::Draft::Draft7),
             Dialect::Draft201909 => options.with_draft(jsonschema::Draft::Draft201909),
             _ => options.with_draft(jsonschema::Draft::Draft202012),
         };
+        if dialect != Dialect::Draft4 {
+            options = options.with_keyword("type", py_type_modern);
+        }
         options
             .build(&reference)
             .expect("bundled dialect meta-schemas compile")
     })
 }
 
-/// Python Draft 4 `type`: booleans are not numbers, floats are never integers.
-struct Draft4Type {
-    types: Vec<String>,
+/// Python's `type` keyword: booleans are not numbers, a Python object of a type JSON has
+/// no counterpart for (see [`pyrepr::foreign`]) is of no type, and under Draft 4 floats
+/// are never integers.
+struct PyType {
+    /// The accepted types, as [`type_bits`] bits.
+    accepted: u8,
     /// The rendered `type` value, as upstream prints it.
     reprs: String,
 }
 
-fn draft4_type<'a>(
-    _: &'a Map<String, Value>,
+const NULL: u8 = 1;
+const BOOLEAN: u8 = 1 << 1;
+const INTEGER: u8 = 1 << 2;
+const NUMBER: u8 = 1 << 3;
+const STRING: u8 = 1 << 4;
+const ARRAY: u8 = 1 << 5;
+const OBJECT: u8 = 1 << 6;
+
+fn type_bit(name: &str) -> Option<u8> {
+    Some(match name {
+        "array" => ARRAY,
+        "boolean" => BOOLEAN,
+        "integer" => INTEGER,
+        "null" => NULL,
+        "number" => NUMBER,
+        "object" => OBJECT,
+        "string" => STRING,
+        _ => return None,
+    })
+}
+
+/// The types `instance` is to Python's type checkers. Draft 6 and later count floats with
+/// an integral value as integers.
+fn type_bits(instance: &Value, draft4: bool) -> u8 {
+    match instance {
+        Value::Null => NULL,
+        Value::Bool(_) => BOOLEAN,
+        Value::Number(n) => {
+            let integral = n.is_i64()
+                || n.is_u64()
+                || (!draft4 && n.as_f64().is_some_and(|f| f.fract() == 0.0));
+            if integral { NUMBER | INTEGER } else { NUMBER }
+        }
+        Value::String(_) => STRING,
+        Value::Array(_) => ARRAY,
+        Value::Object(_) => {
+            if pyrepr::foreign(instance).is_some() {
+                0
+            } else {
+                OBJECT
+            }
+        }
+    }
+}
+
+fn py_type<'a>(
     value: &'a Value,
-    _: Location,
+    draft4: bool,
 ) -> Result<Box<dyn for<'i> Keyword<'i>>, jsonschema::ValidationError<'a>> {
-    let types: Vec<String> = match value {
-        Value::String(t) => vec![t.clone()],
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|t| t.as_str().map(str::to_owned))
-            .collect(),
+    let types: Vec<&str> = match value {
+        Value::String(t) => vec![t.as_str()],
+        Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
     let reprs = types
@@ -295,25 +344,47 @@ fn draft4_type<'a>(
         .map(|t| repr_str(t))
         .collect::<Vec<_>>()
         .join(", ");
-    Ok(Box::new(Draft4Type { types, reprs }))
+    let accepted = types
+        .iter()
+        .filter_map(|t| type_bit(t))
+        .fold(0, |bits, bit| bits | bit);
+    Ok(Box::new(PyType {
+        accepted: if draft4 { accepted | DRAFT4 } else { accepted },
+        reprs,
+    }))
+}
+
+/// Marks a [`PyType`] built for Draft 4 (floats are never integers).
+const DRAFT4: u8 = 1 << 7;
+
+fn py_type_draft4<'a>(
+    _: &'a Map<String, Value>,
+    value: &'a Value,
+    _: Location,
+) -> Result<Box<dyn for<'i> Keyword<'i>>, jsonschema::ValidationError<'a>> {
+    py_type(value, true)
+}
+
+fn py_type_modern<'a>(
+    _: &'a Map<String, Value>,
+    value: &'a Value,
+    _: Location,
+) -> Result<Box<dyn for<'i> Keyword<'i>>, jsonschema::ValidationError<'a>> {
+    py_type(value, false)
 }
 
 /// `TypeChecker.is_type` for Python's Draft 4 type checker (and openapi-schema-validator's
 /// OAS 3.0 checker, which is identical for JSON values).
 pub(crate) fn is_draft4_type(instance: &Value, name: &str) -> Option<bool> {
-    Some(match name {
-        "array" => instance.is_array(),
-        "boolean" => instance.is_boolean(),
-        "integer" => instance.is_i64() || instance.is_u64(),
-        "null" => instance.is_null(),
-        "number" => instance.is_number(),
-        "object" => instance.is_object(),
-        "string" => instance.is_string(),
-        _ => return None,
-    })
+    is_python_type(instance, name, true)
 }
 
-impl<'i> Keyword<'i> for Draft4Type {
+/// `TypeChecker.is_type` for Python's type checkers; `None` for a type they do not define.
+pub(crate) fn is_python_type(instance: &Value, name: &str, draft4: bool) -> Option<bool> {
+    Some(type_bits(instance, draft4) & type_bit(name)? != 0)
+}
+
+impl<'i> Keyword<'i> for PyType {
     fn validate(&self, instance: &'i Value) -> Result<(), jsonschema::ValidationError<'i>> {
         if self.is_valid(instance) {
             Ok(())
@@ -327,9 +398,7 @@ impl<'i> Keyword<'i> for Draft4Type {
     }
 
     fn is_valid(&self, instance: &'i Value) -> bool {
-        self.types
-            .iter()
-            .any(|t| is_draft4_type(instance, t).unwrap_or(false))
+        type_bits(instance, self.accepted & DRAFT4 != 0) & self.accepted != 0
     }
 }
 
@@ -472,6 +541,7 @@ pub(crate) fn convert_errors<'e>(
     instance_root: &Value,
 ) -> Vec<ValidationError> {
     let mut keyed: Vec<(Vec<usize>, ValidationError)> = errors
+        .filter(|error| !about_python_object(error, instance_root))
         .map(|error| {
             let converted = convert_error(&error, schemas, instance_root);
             let key = match (&converted.schema_error, schemas.resources.first()) {
@@ -492,6 +562,40 @@ pub(crate) fn convert_errors<'e>(
     // jsonschema reports `items: false` once per extra item; Python once per array.
     keyed.dedup_by(|a, b| a.1 == b.1);
     keyed.into_iter().map(|(_, error)| error).collect()
+}
+
+/// Whether Python's jsonschema would never produce `error`, because it concerns a Python
+/// object of a type JSON has no counterpart for (see [`pyrepr::foreign`]): the crate sees
+/// the mapping standing in for it and applies the keywords that only concern mappings,
+/// which jsonschema skips for anything that is not a `dict`; `type` (and `enum`, `const`)
+/// are what it reports for such an object, and those pass through.
+fn about_python_object(error: &jsonschema::ValidationError<'_>, instance_root: &Value) -> bool {
+    const MAPPING_KEYWORDS: [&str; 11] = [
+        "required",
+        "properties",
+        "patternProperties",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "minProperties",
+        "maxProperties",
+        "dependencies",
+        "dependentRequired",
+        "dependentSchemas",
+    ];
+    let instance_path = instance_path_items(error.instance_path(), instance_root);
+    // An error inside the stand-in (a subschema applied to its entry).
+    if instance_path
+        .iter()
+        .any(|item| matches!(item, PathItem::Key(key) if key == pyrepr::FOREIGN_KEY))
+    {
+        return true;
+    }
+    if pyrepr::foreign(error.instance()).is_none() {
+        return false;
+    }
+    let keyword = path_items(error.schema_path());
+    matches!(keyword.last(), Some(PathItem::Key(keyword)) if MAPPING_KEYWORDS.contains(&keyword.as_str()))
 }
 
 /// The schema resources a validator was built from, for interpreting its errors.
@@ -612,6 +716,7 @@ fn convert_relative(
                 .flat_map(|branch| {
                     let mut keyed: Vec<(Vec<usize>, ValidationError)> = branch
                         .iter()
+                        .filter(|child| !about_python_object(child, instance_root))
                         .map(|child| {
                             let converted = convert_relative(
                                 child,
@@ -644,7 +749,11 @@ fn convert_relative(
         let message = format!("False schema does not allow {}", repr(instance));
         (message, String::new(), Value::Bool(false))
     } else {
-        (python_message(error, instance, &schema), keyword, schema)
+        (
+            python_message(error, &keyword, instance, &schema),
+            keyword,
+            schema,
+        )
     };
     ValidationError::from_schema(
         message,
@@ -864,6 +973,7 @@ fn subschema<'v>(root: &'v Value, path: &[PathItem]) -> Option<&'v Value> {
 
 fn python_message(
     error: &jsonschema::ValidationError<'_>,
+    keyword: &str,
     instance: &Value,
     schema: &Value,
 ) -> String {
@@ -871,6 +981,28 @@ fn python_message(
     let value = |key: &str| schema.get(key).map(repr).unwrap_or_default();
     match error.kind() {
         ValidationErrorKind::Custom { message, .. } => message.clone(),
+        // The crate checks an array-valued dependency with its `required` validator;
+        // Python's `dependencies` / `dependentRequired` word the failure differently.
+        ValidationErrorKind::Required { property }
+            if matches!(keyword, "dependencies" | "dependentRequired") =>
+        {
+            let dependent = schema
+                .get(keyword)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .find(|(name, needed)| {
+                    instance.get(name).is_some()
+                        && needed
+                            .as_array()
+                            .is_some_and(|items| items.contains(property))
+                })
+                .map(|(name, _)| name);
+            match dependent {
+                Some(name) => format!("{} is a dependency of {}", repr(property), repr_str(name)),
+                None => format!("{} is a required property", repr(property)),
+            }
+        }
         ValidationErrorKind::Type { kind } => {
             let reprs = match (schema.get("type"), kind) {
                 (Some(Value::Array(types)), _) => {

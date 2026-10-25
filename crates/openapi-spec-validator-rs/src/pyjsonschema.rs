@@ -25,7 +25,7 @@ use crate::formats::{self, FormatOutcome, FormatSet};
 use crate::meta::Dialect;
 use crate::pyobj::{self, Num, json_equal, num_cmp, py_str, truthy};
 use crate::pyregex::{self, PyRegex};
-use crate::pyrepr::{PathItem, pformat, repr, repr_str};
+use crate::pyrepr::{PathItem, foreign, pformat, repr, repr_str};
 use crate::values::{ValueError, multiple_of, number, unsupported_comparison};
 use crate::version::python_type_name;
 
@@ -193,7 +193,7 @@ impl Class {
             },
             "null" => instance.is_null(),
             "number" => instance.is_number(),
-            "object" => instance.is_object(),
+            "object" => pyobj::as_dict(instance).is_some(),
             "string" => instance.is_string(),
             _ => return None,
         })
@@ -568,7 +568,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "additionalProperties" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 // A set upstream: its iteration order varies between runs; this keeps
@@ -763,7 +763,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "dependencies" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for (property, dependency) in py_items(value)? {
@@ -790,7 +790,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "dependentRequired" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for (property, dependency) in py_items(value)? {
@@ -968,7 +968,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "patternProperties" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for (pattern, subschema) in py_items(value)? {
@@ -1007,7 +1007,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "properties" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for (property, subschema) in py_items(value)? {
@@ -1022,7 +1022,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "propertyNames" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for property in object.keys() {
@@ -1034,7 +1034,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "required" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for property in py_iter(value)?.iter() {
@@ -1095,7 +1095,7 @@ impl<'d> Evaluator<'d, '_, '_> {
                 }
             }
             "unevaluatedProperties" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 let evaluated = self.evaluated_properties_in(validator, instance, schema)?;
@@ -1361,7 +1361,7 @@ impl<'d> Evaluator<'d, '_, '_> {
         map: &Map<String, Value>,
     ) -> Result<Vec<String>, Crash> {
         let empty = Map::new();
-        let object = instance.as_object().unwrap_or(&empty);
+        let object = pyobj::as_dict(instance).unwrap_or(&empty);
         let legacy = validator.class == Class::Draft201909;
         let present = |properties: &Map<String, Value>| {
             properties
@@ -1532,7 +1532,7 @@ fn py_items(value: &Value) -> Result<&Map<String, Value>, Crash> {
 fn py_len(value: &Value) -> Result<usize, Crash> {
     match value {
         Value::Array(items) => Ok(items.len()),
-        Value::Object(map) => Ok(map.len()),
+        Value::Object(map) if foreign(value).is_none() => Ok(map.len()),
         Value::String(s) => Ok(s.chars().count()),
         other => Err(Crash(format!(
             "object of type '{}' has no len()",
@@ -1544,7 +1544,7 @@ fn py_len(value: &Value) -> Result<usize, Crash> {
 /// `"|".join(value)`.
 fn py_join(value: &Value) -> Result<String, Crash> {
     let parts = match value {
-        Value::Object(map) => map.keys().cloned().collect::<Vec<_>>(),
+        Value::Object(map) if foreign(value).is_none() => map.keys().cloned().collect::<Vec<_>>(),
         Value::String(s) => s.chars().map(String::from).collect(),
         Value::Array(items) => items
             .iter()
@@ -1565,7 +1565,7 @@ fn py_join(value: &Value) -> Result<String, Crash> {
 /// `key in container` for a string key.
 fn contains(container: &Value, key: &str) -> Result<bool, Crash> {
     match container {
-        Value::Object(map) => Ok(map.contains_key(key)),
+        Value::Object(map) if foreign(container).is_none() => Ok(map.contains_key(key)),
         Value::Array(items) => Ok(items.iter().any(|item| item.as_str() == Some(key))),
         Value::String(s) => Ok(s.contains(key)),
         other => Err(not_iterable_argument(other)),
@@ -1600,7 +1600,7 @@ fn unhashable(value: &Value) -> Crash {
 }
 
 /// `UnknownType(type, instance, schema)`, rendered like jsonschema.
-fn unknown_type(name: &Value, instance: &Value, schema: &Map<String, Value>) -> Crash {
+pub(crate) fn unknown_type(name: &Value, instance: &Value, schema: &Map<String, Value>) -> Crash {
     let pretty = |value: &Value| pformat(value, 72, false).replace('\n', "\n    ");
     Crash(format!(
         "Unknown type {} for validator with schema:\n    {}\n\nWhile checking instance:\n    {}",

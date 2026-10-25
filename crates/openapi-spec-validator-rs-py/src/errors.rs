@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use serde_json::Value;
 
-use crate::convert::{path_to_python, to_python};
+use crate::convert::{PythonObjects, path_to_python, to_python};
 use crate::stack;
 
 /// One validation error, as produced by the validator.
@@ -20,13 +20,16 @@ pub struct CoreError {
     root: Arc<ValidationError>,
     /// Indices into nested `context` lists, leading from `root` to this error.
     context_path: Vec<usize>,
+    /// The Python objects the validated document stood in for, for `instance`.
+    objects: Arc<PythonObjects>,
 }
 
 impl CoreError {
-    pub fn new(error: ValidationError) -> Self {
+    pub fn new(error: ValidationError, objects: Arc<PythonObjects>) -> Self {
         Self {
             root: Arc::new(error),
             context_path: Vec::new(),
+            objects,
         }
     }
 
@@ -40,12 +43,18 @@ impl CoreError {
         py: Python<'py>,
         field: fn(&SchemaErrorDetails) -> &Value,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let Some(details) = self.error().schema_error.as_deref() else {
+        if self.error().schema_error.is_none() {
             return Ok(py.None().into_bound(py));
-        };
-        let value = field(details);
-        let object = stack::run(py, || {
-            Python::attach(|py| to_python(py, value).map(Bound::unbind))
+        }
+        let root = Arc::clone(&self.root);
+        let context_path = self.context_path.clone();
+        let objects = Arc::clone(&self.objects);
+        let object = stack::run(py, move || {
+            let details = resolve(&root, &context_path)
+                .schema_error
+                .as_deref()
+                .expect("checked above");
+            Python::attach(|py| to_python(py, field(details), &objects).map(Bound::unbind))
         })?;
         Ok(object.into_bound(py))
     }
@@ -128,6 +137,7 @@ impl CoreError {
                 CoreError {
                     root: Arc::clone(&self.root),
                     context_path,
+                    objects: Arc::clone(&self.objects),
                 }
             })
             .collect()
@@ -135,9 +145,10 @@ impl CoreError {
 
     /// `str(error)` as upstream renders it.
     fn render(&self, py: Python<'_>) -> PyResult<String> {
-        let error = self.error();
+        let root = Arc::clone(&self.root);
+        let context_path = self.context_path.clone();
         // Rendering pretty-prints the schema and instance, which can be large and deep.
-        stack::run(py, || Ok(error.to_string()))
+        stack::run(py, move || Ok(resolve(&root, &context_path).to_string()))
     }
 
     fn __repr__(&self) -> String {

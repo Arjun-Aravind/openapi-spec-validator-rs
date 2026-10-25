@@ -1,12 +1,79 @@
 //! Python `repr()`, `pprint.pformat()` and jsonschema `ValidationError.__str__` for JSON values.
 //!
-//! Values are what `json.loads` produces (dict / list / str / int / float / bool / None).
-//! Every length and width counts Unicode code points, like Python's `len()`. Mirrors
-//! CPython 3.13 (`Objects/unicodeobject.c` `unicode_repr`, `Lib/pprint.py`, `Lib/textwrap.py`)
-//! and jsonschema 4.26 (`exceptions._Error.__str__`, `_utils.format_as_index`).
+//! Values are what `json.loads` produces (dict / list / str / int / float / bool / None),
+//! plus the stand-in for any other Python object (see [`foreign`]). Every length and width
+//! counts Unicode code points, like Python's `len()`. Mirrors CPython 3.13
+//! (`Objects/unicodeobject.c` `unicode_repr`, `Lib/pprint.py`, `Lib/textwrap.py`) and
+//! jsonschema 4.26 (`exceptions._Error.__str__`, `_utils.format_as_index`).
 
 use serde_json::{Map, Number, Value};
 use std::fmt::Write as _;
+
+// ---------------------------------------------------------------------------------------------
+// Python objects without a JSON counterpart
+// ---------------------------------------------------------------------------------------------
+
+/// The key of the single-entry object that stands for a Python object of a type JSON has no
+/// counterpart for, in a document handed to the Python bindings as objects: a `datetime.date`
+/// that `yaml.safe_load` produced for an unquoted `2020-01-01`, `bytes`, a `set`, ... The
+/// entry's value is `[type name, repr(type), repr(object), str(object)]`.
+///
+/// Such an object has no JSON type, so jsonschema reports it wherever a type is required,
+/// shows it with its `repr()`, and otherwise leaves it alone; the validator does the same
+/// with its stand-in. A document read from a file never contains one.
+pub const FOREIGN_KEY: &str = "\u{0}python object";
+
+/// What is known about a Python object standing in a document (see [`FOREIGN_KEY`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Foreign<'a> {
+    /// `type(obj).__name__` as C-level messages print it (`tp_name`): module-qualified for
+    /// a static type outside `builtins`, e.g. `datetime.date`, plain otherwise.
+    pub type_name: &'a str,
+    /// `repr(type(obj))`, e.g. `<class 'datetime.date'>`.
+    pub class_repr: &'a str,
+    /// `repr(obj)`.
+    pub repr: &'a str,
+    /// `str(obj)`.
+    pub str: &'a str,
+}
+
+/// The stand-in for a Python object (see [`FOREIGN_KEY`]).
+pub fn foreign_value(type_name: &str, class_repr: &str, repr: &str, str: &str) -> Value {
+    let mut map = Map::with_capacity(1);
+    map.insert(
+        FOREIGN_KEY.to_owned(),
+        Value::Array(vec![
+            Value::String(type_name.to_owned()),
+            Value::String(class_repr.to_owned()),
+            Value::String(repr.to_owned()),
+            Value::String(str.to_owned()),
+        ]),
+    );
+    Value::Object(map)
+}
+
+/// The Python object `value` stands for, if it is such a stand-in (see [`FOREIGN_KEY`]).
+pub fn foreign(value: &Value) -> Option<Foreign<'_>> {
+    let map = value.as_object()?;
+    if map.len() != 1 {
+        return None;
+    }
+    // Checked on every mapping the validator looks at: the leading NUL rules out an
+    // ordinary key before any hashing or comparing.
+    let (key, entry) = map.iter().next()?;
+    if key.as_bytes().first() != Some(&0) || key != FOREIGN_KEY {
+        return None;
+    }
+    let [type_name, class_repr, repr, str] = entry.as_array()?.as_slice() else {
+        return None;
+    };
+    Some(Foreign {
+        type_name: type_name.as_str()?,
+        class_repr: class_repr.as_str()?,
+        repr: repr.as_str()?,
+        str: str.as_str()?,
+    })
+}
 
 // ---------------------------------------------------------------------------------------------
 // repr
@@ -127,6 +194,10 @@ fn write_repr_number(n: &Number, out: &mut String) {
 
 /// `repr()`; with `sort_dicts` it is pprint's `_safe_repr` (dict items sorted by key).
 fn write_repr(value: &Value, sort_dicts: bool, out: &mut String) {
+    if let Some(object) = foreign(value) {
+        out.push_str(object.repr);
+        return;
+    }
     match value {
         Value::Null => out.push_str("None"),
         Value::Bool(true) => out.push_str("True"),
@@ -258,6 +329,10 @@ fn repr_exceeds(value: &Value, limit: i64) -> bool {
 }
 
 fn repr_consume(value: &Value, remaining: &mut i64) -> bool {
+    if let Some(object) = foreign(value) {
+        *remaining -= char_len(object.repr);
+        return *remaining < 0;
+    }
     match value {
         Value::String(s) => return str_repr_consume(s, remaining),
         Value::Null | Value::Bool(_) | Value::Number(_) => {
@@ -333,6 +408,8 @@ impl PrettyPrinter<'_> {
     fn format(&mut self, value: &Value, indent: i64, allowance: i64, level: usize) {
         let max_width = self.width - indent - allowance;
         match value {
+            // Not a dict to pprint: no `_dispatch` entry, so its repr is written whole.
+            _ if foreign(value).is_some() => write_repr(value, self.sort_dicts, self.out),
             Value::Object(map) if repr_exceeds(value, max_width) => {
                 self.pprint_dict(map, indent, allowance, level + 1)
             }
@@ -866,3 +943,31 @@ static NON_PRINTABLE: &[u32] = &[
     0x2a6ff, 0x2b73a, 0x2b73f, 0x2b81e, 0x2b81f, 0x2cea2, 0x2ceaf, 0x2ebe1, 0x2ebef, 0x2ee5e,
     0x2f7ff, 0x2fa1e, 0x2ffff, 0x3134b, 0x3134f, 0x323b0, 0xe00ff, 0xe01f0, 0x10ffff,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_objects_print_their_repr() {
+        let date = foreign_value(
+            "datetime.date",
+            "<class 'datetime.date'>",
+            "datetime.date(2020, 1, 1)",
+            "2020-01-01",
+        );
+        assert_eq!(foreign(&date).map(|o| o.type_name), Some("datetime.date"));
+        assert_eq!(repr(&date), "datetime.date(2020, 1, 1)");
+        let holder = serde_json::json!({"when": [date.clone(), "x"]});
+        assert_eq!(repr(&holder), "{'when': [datetime.date(2020, 1, 1), 'x']}");
+        // Not a dict to pprint: never split over lines, and measured by its repr.
+        assert_eq!(
+            pformat(&holder, 20, false),
+            "{'when': [datetime.date(2020, 1, 1),\n          'x']}"
+        );
+        assert_eq!(pformat(&date, 5, false), "datetime.date(2020, 1, 1)");
+        // Anything else shaped like the stand-in is an ordinary mapping.
+        assert!(foreign(&serde_json::json!({"\u{0}python object": "x"})).is_none());
+        assert!(foreign(&serde_json::json!({"a": 1})).is_none());
+    }
+}

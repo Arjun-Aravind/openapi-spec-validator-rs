@@ -5,6 +5,7 @@
 
 use super::bigint::BigInt;
 use super::pyfmt::{lower, repr_str, repr_str_200, strip, unicode_encode_error};
+use crate::pyobj::decimal_to_ascii;
 
 /// `sys.get_int_max_str_digits()` default.
 const MAX_STR_DIGITS: usize = 4300;
@@ -73,7 +74,8 @@ pub(super) fn py_int(s: &str, base: u32) -> Result<BigInt, String> {
             repr_str_200(s)
         )
     };
-    let t = strip(s);
+    let ascii = decimal_to_ascii(s).ok_or_else(invalid)?;
+    let t = strip(&ascii);
     let (negative, t) = match t.as_bytes().first() {
         Some(b'-') => (true, &t[1..]),
         Some(b'+') => (false, &t[1..]),
@@ -147,9 +149,11 @@ pub(super) fn float_value(s: &str) -> Result<FloatValue, String> {
     Ok(FloatValue::Num(sign * py_float(value)?))
 }
 
-/// Python's `float(s)` for ASCII input.
+/// Python's `float(s)`.
 pub(super) fn py_float(s: &str) -> Result<f64, String> {
-    let t = strip(s);
+    let invalid = || format!("could not convert string to float: {}", repr_str(s));
+    let ascii = decimal_to_ascii(s).ok_or_else(invalid)?;
+    let t = strip(&ascii);
     // Rust's grammar matches Python's for these strings: optional sign, digits with an optional
     // point and exponent, or inf/infinity/nan in any case. Underscores are already gone.
     let plausible = !t.is_empty()
@@ -158,7 +162,7 @@ pub(super) fn py_float(s: &str) -> Result<f64, String> {
     plausible
         .then(|| t.parse::<f64>().ok())
         .flatten()
-        .ok_or_else(|| format!("could not convert string to float: {}", repr_str(s)))
+        .ok_or_else(invalid)
 }
 
 /// `construct_yaml_binary`'s checks; the bytes themselves are never needed because

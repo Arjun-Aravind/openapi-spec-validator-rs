@@ -1,14 +1,50 @@
 //! Python object semantics for JSON-loaded values (equality, truthiness, `str()`).
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use serde_json::{Number, Value};
+use serde_json::{Map, Number, Value};
 
-use crate::pyrepr;
+use crate::formats::decimal_value;
+use crate::pyrepr::{self, foreign, py_isspace};
 use crate::version::python_type_name;
+
+/// The mapping `value` is, unless it stands for a Python object of another type (see
+/// [`pyrepr::foreign`]), which is no `dict` however it is stored.
+pub(crate) fn as_dict(value: &Value) -> Option<&Map<String, Value>> {
+    match value {
+        Value::Object(map) if foreign(value).is_none() => Some(map),
+        _ => None,
+    }
+}
+
+/// `_PyUnicode_TransformDecimalAndSpaceToASCII`, which `int()` and `float()` apply to their
+/// argument first: non-ASCII whitespace becomes a space and a non-ASCII decimal digit its
+/// ASCII digit, so `int('١٢')` is 12. Any other non-ASCII character makes the conversion
+/// fail (`None`); the caller words the error with the original string.
+pub(crate) fn decimal_to_ascii(s: &str) -> Option<Cow<'_, str>> {
+    if s.is_ascii() {
+        return Some(Cow::Borrowed(s));
+    }
+    let mut ascii = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            ascii.push(c);
+        } else if py_isspace(c) {
+            ascii.push(' ');
+        } else {
+            ascii.push(char::from_digit(decimal_value(c)?, 10)?);
+        }
+    }
+    Some(Cow::Owned(ascii))
+}
 
 /// Python truthiness.
 pub(crate) fn truthy(value: &Value) -> bool {
+    if foreign(value).is_some() {
+        // Dates and most other objects are true; an empty `bytes` or `set` is not modelled.
+        return true;
+    }
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -23,13 +59,19 @@ pub(crate) fn truthy(value: &Value) -> bool {
 pub(crate) fn py_str(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        other => pyrepr::repr(other),
+        other => match foreign(other) {
+            Some(object) => object.str.to_owned(),
+            None => pyrepr::repr(other),
+        },
     }
 }
 
 /// `repr(type(value))`, e.g. `<class 'int'>`.
 pub(crate) fn type_class(value: &Value) -> String {
-    format!("<class '{}'>", python_type_name(value))
+    match foreign(value) {
+        Some(object) => object.class_repr.to_owned(),
+        None => format!("<class '{}'>", python_type_name(value)),
+    }
 }
 
 /// Python `==` between JSON-loaded objects (`True == 1`, `1 == 1.0`).
@@ -116,6 +158,8 @@ pub(crate) fn num_cmp(a: &Num, b: &Num) -> Option<Ordering> {
 /// `hash(value)` succeeds: lists and dicts are unhashable.
 pub(crate) fn check_hashable(value: &Value) -> Result<(), String> {
     match value {
+        // Dates and bytes hash; a `set` would not, which is not modelled.
+        _ if foreign(value).is_some() => Ok(()),
         Value::Array(_) | Value::Object(_) => {
             Err(format!("unhashable type: '{}'", python_type_name(value)))
         }
@@ -126,6 +170,10 @@ pub(crate) fn check_hashable(value: &Value) -> Result<(), String> {
 /// The elements of `iter(value)`: list items, dict keys, or string characters.
 pub(crate) fn iterate(value: &Value) -> Result<Vec<Value>, String> {
     match value {
+        _ if foreign(value).is_some() => Err(format!(
+            "'{}' object is not iterable",
+            python_type_name(value)
+        )),
         Value::Array(items) => Ok(items.clone()),
         Value::Object(map) => Ok(map.keys().map(|k| Value::String(k.clone())).collect()),
         Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),

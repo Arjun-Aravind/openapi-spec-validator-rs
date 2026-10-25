@@ -1,11 +1,11 @@
 //! Conversion between Python objects and [`serde_json::Value`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use openapi_spec_validator_rs::pyrepr::{self, PathItem};
+use openapi_spec_validator_rs::pyrepr::{self, Foreign, PathItem};
 use pyo3::exceptions::{PyRecursionError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
 use serde_json::{Map, Number, Value};
 
 /// The deepest container nesting accepted, the same limit the file reader applies
@@ -13,26 +13,57 @@ use serde_json::{Map, Number, Value};
 /// within the stack.
 const MAX_DEPTH: usize = 9989;
 
-/// Converts a spec given as Python objects.
+/// The Python objects a converted document stands in for (see [`pyrepr::foreign`]), by
+/// what their stand-ins record, so that [`to_python`] can hand the objects themselves back
+/// (an error's `instance` is the `datetime.date` from the document, as upstream's is).
+#[derive(Default)]
+pub struct PythonObjects {
+    by_description: HashMap<(String, String, String), Py<PyAny>>,
+}
+
+impl PythonObjects {
+    fn key(object: Foreign<'_>) -> (String, String, String) {
+        (
+            object.type_name.to_owned(),
+            object.repr.to_owned(),
+            object.str.to_owned(),
+        )
+    }
+
+    fn get(&self, object: Foreign<'_>) -> Option<&Py<PyAny>> {
+        self.by_description.get(&Self::key(object))
+    }
+}
+
+/// Converts a spec given as Python objects, with the objects its result stands in for.
 ///
 /// Accepts what `json.loads` produces (`dict` with `str` keys, `list`, `str`, `int`,
 /// `float`, `bool`, `None`) plus `tuple` as an array, including subclasses such as
 /// `OrderedDict` or `StrEnum`. NaN and infinities become `null` and integers outside
-/// the 64-bit range become floats, exactly as the file reader loads them. Anything
-/// else raises: `TypeError` for other types and non-`str` keys, `ValueError` for
-/// circular references, `RecursionError` beyond [`MAX_DEPTH`].
-pub fn to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+/// the 64-bit range become floats, exactly as the file reader loads them. An object of
+/// any other type that is not a number (`datetime.date`, `bytes`, `set`, ...) becomes
+/// its stand-in (see [`pyrepr::foreign`]), which jsonschema treats as an object of no
+/// type, as upstream does. Anything else raises: `TypeError` for other numbers
+/// (`Decimal`, `Fraction`, ...) and non-`str` keys, `ValueError` for circular
+/// references, `RecursionError` beyond [`MAX_DEPTH`].
+pub fn to_value(obj: &Bound<'_, PyAny>) -> PyResult<(Value, PythonObjects)> {
     let mut converter = Converter {
         active: HashSet::new(),
+        objects: PythonObjects::default(),
+        number_type: None,
     };
-    converter
+    let value = converter
         .convert(obj, 0)
-        .map_err(|failure| failure.into_err())
+        .map_err(|failure| failure.into_err())?;
+    Ok((value, converter.objects))
 }
 
 struct Converter {
     /// Containers on the current path, by address, to detect cycles.
     active: HashSet<usize>,
+    objects: PythonObjects,
+    /// `numbers.Number`, imported on first use.
+    number_type: Option<Py<PyType>>,
 }
 
 /// A conversion failure; its location is collected in reverse while unwinding so that the
@@ -155,7 +186,59 @@ impl Converter {
         if let Ok(tuple) = obj.cast::<PyTuple>() {
             return self.array(obj, tuple.iter(), tuple.len(), depth);
         }
-        Err(Failure::new(FailureKind::UnsupportedType(type_name(obj))))
+        // Other numbers (`Decimal`, `Fraction`, ...) are numbers to jsonschema, which
+        // the document model cannot express: refused rather than misjudged.
+        if self.is_number(obj)? {
+            return Err(Failure::new(FailureKind::UnsupportedType(type_name(obj))));
+        }
+        self.foreign(obj)
+    }
+
+    /// `isinstance(obj, numbers.Number)`.
+    fn is_number(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = obj.py();
+        if self.number_type.is_none() {
+            let number = py
+                .import("numbers")?
+                .getattr("Number")?
+                .cast_into::<PyType>()?;
+            self.number_type = Some(number.unbind());
+        }
+        let number = self.number_type.as_ref().expect("set above").bind(py);
+        obj.is_instance(number)
+    }
+
+    /// The stand-in for an object of a type JSON has no counterpart for.
+    fn foreign(&mut self, obj: &Bound<'_, PyAny>) -> Result<Value, Failure> {
+        let class = obj.get_type();
+        // `tp_name`, as C-level messages print the type: a heap type (a class defined in
+        // Python) by its `__name__`, a static type by its module-qualified name, except
+        // in `builtins`.
+        // SAFETY: `as_type_ptr` is a valid type object pointer.
+        let flags = unsafe { pyo3::ffi::PyType_GetFlags(class.as_type_ptr()) };
+        let type_name = if flags & pyo3::ffi::Py_TPFLAGS_HEAPTYPE != 0 {
+            class.name()?.to_string()
+        } else {
+            let module = class.module()?.to_string();
+            let qualname = class.qualname()?.to_string();
+            if module == "builtins" {
+                qualname
+            } else {
+                format!("{module}.{qualname}")
+            }
+        };
+        let class_repr = class.repr()?.to_string();
+        let repr = obj.repr()?.to_string();
+        let str = obj.str()?.to_string();
+        let value = pyrepr::foreign_value(&type_name, &class_repr, &repr, &str);
+        let described = pyrepr::foreign(&value).expect("built by foreign_value");
+        // Objects described alike are alike to the validator (equal stand-ins); the first
+        // one seen represents them all.
+        self.objects
+            .by_description
+            .entry(PythonObjects::key(described))
+            .or_insert_with(|| obj.clone().unbind());
+        Ok(value)
     }
 
     fn array<'py>(
@@ -190,8 +273,21 @@ impl Converter {
     }
 }
 
-/// Converts a value to the Python objects `json.loads` would produce.
-pub fn to_python<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
+/// Converts a value to the Python objects `json.loads` would produce; a stand-in (see
+/// [`pyrepr::foreign`]) becomes the object it was converted from, found in `objects`.
+pub fn to_python<'py>(
+    py: Python<'py>,
+    value: &Value,
+    objects: &PythonObjects,
+) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(described) = pyrepr::foreign(value) {
+        return Ok(match objects.get(described) {
+            Some(object) => object.bind(py).clone(),
+            // Not from this conversion (a document read from a file holding the stand-in's
+            // shape, say): the next best thing is how it prints.
+            None => PyString::new(py, described.repr).into_any(),
+        });
+    }
     Ok(match value {
         Value::Null => py.None().into_bound(py),
         Value::Bool(b) => PyBool::new(py, *b).to_owned().into_any(),
@@ -208,14 +304,14 @@ pub fn to_python<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyA
         Value::Array(items) => {
             let list = PyList::empty(py);
             for item in items {
-                list.append(to_python(py, item)?)?;
+                list.append(to_python(py, item, objects)?)?;
             }
             list.into_any()
         }
         Value::Object(map) => {
             let dict = PyDict::new(py);
             for (key, item) in map {
-                dict.set_item(key, to_python(py, item)?)?;
+                dict.set_item(key, to_python(py, item, objects)?)?;
             }
             dict.into_any()
         }

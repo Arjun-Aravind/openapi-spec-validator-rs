@@ -347,7 +347,7 @@ impl<'d, 'a> Walker<'d, 'a> {
             let location = self.item(parameter, "in")?;
             // jsonschema-path hands out lists and mappings as `SchemaPath`s, which are
             // hashable and equal only to the same path: such a key is never a duplicate.
-            let container = |v: &Value| v.is_array() || v.is_object();
+            let container = |v: &Value| v.is_array() || pyobj::as_dict(v).is_some();
             if container(name) || container(location) {
                 continue;
             }
@@ -451,7 +451,7 @@ impl<'d, 'a> Walker<'d, 'a> {
     /// as a nested subschema never gets the `required` check.
     fn schema(&mut self, schema: Node<'d>, require_properties: bool, meta_checked: bool) -> Step {
         let value = schema.value;
-        if !value.is_object() && !value.is_boolean() {
+        if pyobj::as_dict(value).is_none() && !value.is_boolean() {
             return self.emit_new(
                 ErrorKind::OpenApiValidation,
                 format!("{} is not of type 'object', 'boolean'", repr(value)),
@@ -675,9 +675,7 @@ impl<'d, 'a> Walker<'d, 'a> {
 
 /// `"key" in path` on a resolved node.
 fn contains(node: Node<'_>, key: &str) -> bool {
-    node.value
-        .as_object()
-        .is_some_and(|map| map.contains_key(key))
+    pyobj::as_dict(node.value).is_some_and(|map| map.contains_key(key))
 }
 
 /// `list(set(required) - set(properties) - set(nested_properties))`.

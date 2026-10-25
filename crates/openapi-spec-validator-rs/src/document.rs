@@ -19,6 +19,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::loader;
+use crate::pyobj;
 use crate::pyrepr;
 use crate::pyurl;
 use crate::retrieve::Retrieve;
@@ -227,7 +228,7 @@ impl<'a> Documents<'a> {
                 let path = url
                     .to_file_path()
                     .map_err(|()| format!("not a file path: {uri}"))?;
-                let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                let bytes = crate::read_file(&path).map_err(|error| error.to_string())?;
                 // Upstream reads files through `urlopen`, which is the stream name
                 // PyYAML reports.
                 loader::load(&bytes, "<urllib response>").map_err(|error| error.message)
@@ -345,7 +346,7 @@ impl<'a> Documents<'a> {
                 Value::Array(items) => position(segment, items.len())?
                     .map(|i| &items[i])
                     .ok_or_else(nowhere)?,
-                Value::Object(map) => {
+                Value::Object(map) if pyrepr::foreign(contents).is_none() => {
                     let key = segment.replace("~1", "/").replace("~0", "~");
                     map.get(&key).ok_or_else(nowhere)?
                 }
@@ -370,8 +371,8 @@ impl<'a> Documents<'a> {
 
     /// The child `key` of a mapping node, resolved (`path / key`).
     pub fn get<'d>(&'d self, node: Node<'d>, key: &str) -> Result<Option<Node<'d>>, Crash> {
-        match node.value {
-            Value::Object(map) => match map.get(key) {
+        match pyobj::as_dict(node.value) {
+            Some(map) => match map.get(key) {
                 Some(value) => self
                     .resolve(Node {
                         value,
@@ -410,7 +411,7 @@ impl<'a> Documents<'a> {
     ) -> Result<Vec<(Key<'d>, Node<'d>)>, Crash> {
         let doc = node.doc;
         match node.value {
-            Value::Object(map) => Ok(map
+            Value::Object(map) if pyrepr::foreign(node.value).is_none() => Ok(map
                 .iter()
                 .map(|(key, value)| (Key::Str(key), Node { value, doc }))
                 .collect()),
@@ -433,11 +434,12 @@ pub(crate) enum Key<'d> {
 
 /// `is_ref` from `jsonschema-path`: a mapping whose `$ref` is a string.
 pub(crate) fn as_ref(value: &Value) -> Option<&str> {
-    value.as_object()?.get("$ref")?.as_str()
+    pyobj::as_dict(value)?.get("$ref")?.as_str()
 }
 
 /// Python `int(s)` for base-10 literals (ASCII digits, sign, underscores, whitespace).
 fn python_int(s: &str) -> Option<i128> {
+    let s = pyobj::decimal_to_ascii(s)?;
     let s = s.trim();
     let (negative, digits) = match s.as_bytes().first()? {
         b'-' => (true, &s[1..]),
@@ -594,5 +596,10 @@ mod tests {
         assert_eq!(python_int("1_0"), Some(10));
         assert_eq!(python_int("1__0"), None);
         assert_eq!(python_int("x"), None);
+        // Python's `int()` reads every script's decimal digits and whitespace.
+        assert_eq!(python_int("\u{660}\u{661}"), Some(1));
+        assert_eq!(python_int("\u{3000}-\u{ff11}\u{ff12} "), Some(-12));
+        assert_eq!(python_int("\u{660}x"), None);
+        assert_eq!(python_int("\u{2160}"), None);
     }
 }

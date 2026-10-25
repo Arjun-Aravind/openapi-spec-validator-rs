@@ -682,7 +682,7 @@ fn py_int_base16(s: &str) -> Option<bool> {
 }
 
 /// Value of a Unicode decimal digit (`unicodedata.decimal`), Unicode 15.1.
-fn decimal_value(c: char) -> Option<u32> {
+pub(crate) fn decimal_value(c: char) -> Option<u32> {
     let cp = c as u32;
     let i = DECIMAL_ZEROS.partition_point(|&z| z <= cp);
     let zero = DECIMAL_ZEROS[..i].last()?;

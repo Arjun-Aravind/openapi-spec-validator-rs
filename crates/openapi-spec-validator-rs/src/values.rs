@@ -14,10 +14,10 @@ use crate::document::{Crash, Documents, LookupError, Node};
 use crate::error::{SchemaErrorDetails, ValidationError};
 use crate::formats::{self, FormatOutcome, FormatSet};
 use crate::meta;
-use crate::pyjsonschema::Evaluator;
+use crate::pyjsonschema::{Evaluator, unknown_type};
 use crate::pyobj::{self, Num, json_equal, num_cmp, truthy};
 use crate::pyregex::{self, PyRegex};
-use crate::pyrepr::{PathItem, repr, repr_float, repr_str};
+use crate::pyrepr::{self, PathItem, repr, repr_float, repr_str};
 use crate::version::{SpecVersion, python_type_name};
 
 /// Python frames upstream can still use when it starts validating a `default`: its
@@ -243,16 +243,12 @@ impl<'d> Oas30<'d, '_, '_> {
         ValueError::new(message)
     }
 
-    /// `TypeChecker.is_type` of the OAS 3.0 type checker.
+    /// `TypeChecker.is_type` of the OAS 3.0 type checker: Draft 4's types without `null`
+    /// (OAS 3.0 has `nullable` instead), so `type: 'null'` raises `UnknownType`.
     fn is_type(instance: &Value, name: &str, schema: &Map<String, Value>) -> Result<bool, Crash> {
-        meta::is_draft4_type(instance, name).ok_or_else(|| {
-            Crash(format!(
-                "Unknown type {} for validator with schema:\n    {}\n\nWhile checking instance:\n    {}",
-                repr_str(name),
-                repr(&Value::Object(schema.clone())),
-                repr(instance)
-            ))
-        })
+        meta::is_draft4_type(instance, name)
+            .filter(|_| name != "null")
+            .ok_or_else(|| unknown_type(&Value::String(name.to_owned()), instance, schema))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -334,7 +330,7 @@ impl<'d> Oas30<'d, '_, '_> {
                 self.length_check(keyword, items.len(), value, instance, errors)?;
             }
             "maxProperties" | "minProperties" => {
-                let Value::Object(map) = instance else {
+                let Some(map) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 self.length_check(keyword, map.len(), value, instance, errors)?;
@@ -398,6 +394,13 @@ impl<'d> Oas30<'d, '_, '_> {
                         return Ok(());
                     }
                     errors.push(Self::error("None for not nullable".to_owned()));
+                }
+                // "Pragmatic": `bytes` pass as a string with `format: binary`.
+                let binary_bytes = name == "string"
+                    && schema.get("format").and_then(Value::as_str) == Some("binary")
+                    && pyrepr::foreign(instance).is_some_and(|o| o.type_name == "bytes");
+                if binary_bytes {
+                    return Ok(());
                 }
                 if !Self::is_type(instance, name, schema)? {
                     errors.push(Self::error(format!(
@@ -515,7 +518,7 @@ impl<'d> Oas30<'d, '_, '_> {
                 }
             }
             "properties" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 let Value::Object(properties) = value else {
@@ -540,7 +543,7 @@ impl<'d> Oas30<'d, '_, '_> {
                 }
             }
             "required" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 for property in pyobj::iterate(value).map_err(Crash)? {
@@ -585,7 +588,7 @@ impl<'d> Oas30<'d, '_, '_> {
                 }
             }
             "additionalProperties" => {
-                let Value::Object(object) = instance else {
+                let Some(object) = pyobj::as_dict(instance) else {
                     return Ok(());
                 };
                 let extras = self.additional_properties(object, schema)?;
@@ -750,7 +753,7 @@ impl<'d> Oas30<'d, '_, '_> {
         let prop_name = discriminator
             .get("propertyName")
             .ok_or_else(|| Crash::key_error("propertyName"))?;
-        let Value::Object(object) = instance else {
+        let Some(object) = pyobj::as_dict(instance) else {
             errors.push(Self::error(format!(
                 "{} is not of type 'object'",
                 repr(instance)

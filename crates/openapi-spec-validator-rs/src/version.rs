@@ -4,6 +4,8 @@ use std::fmt;
 
 use serde_json::Value;
 
+use crate::pyrepr;
+
 /// The specification versions upstream can validate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SpecVersion {
@@ -145,8 +147,13 @@ fn parse_major_minor(s: &str) -> Option<(&str, &str)> {
     Some((&s[..major_len], &rest[..minor_len]))
 }
 
-/// The Python type name of a JSON-loaded value, as used in exception messages.
-pub(crate) fn python_type_name(value: &Value) -> &'static str {
+/// The Python type name of a loaded value as C-level exception messages print it
+/// (`tp_name`; module-qualified for an object of a static type outside `builtins`, see
+/// [`pyrepr::Foreign::type_name`]).
+pub(crate) fn python_type_name(value: &Value) -> &str {
+    if let Some(object) = pyrepr::foreign(value) {
+        return object.type_name;
+    }
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",

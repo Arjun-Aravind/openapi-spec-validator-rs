@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyType;
 
-use crate::convert::{to_python, to_value};
+use crate::convert::{PythonObjects, to_python, to_value};
 use crate::retrieve::PyRetriever;
 
 // Converting and parsing large documents makes millions of small allocations.
@@ -85,10 +85,20 @@ fn check_interrupt(retriever: Option<&Arc<PyRetriever>>) -> PyResult<()> {
 
 /// Validation errors in upstream order; a non-validation failure (unresolvable `$ref`,
 /// recursion, ...) raises `ValidationAbortedError`.
-fn into_errors(py: Python<'_>, outcome: Outcome) -> PyResult<Vec<CoreError>> {
+fn into_errors(
+    py: Python<'_>,
+    outcome: Outcome,
+    objects: PythonObjects,
+) -> PyResult<Vec<CoreError>> {
     match outcome {
         Outcome::Valid => Ok(Vec::new()),
-        Outcome::Invalid(errors) => Ok(errors.into_iter().map(CoreError::new).collect()),
+        Outcome::Invalid(errors) => {
+            let objects = Arc::new(objects);
+            Ok(errors
+                .into_iter()
+                .map(|error| CoreError::new(error, Arc::clone(&objects)))
+                .collect())
+        }
         Outcome::Error(message) => Err(exception(py, "ValidationAbortedError", (message,))),
     }
 }
@@ -112,16 +122,16 @@ fn validate(
         all_errors,
         retriever.as_ref(),
     );
-    let spec = spec.as_unbound();
-    let outcome = stack::run(py, || {
-        let value = Python::attach(|py| to_value(spec.bind(py)))?;
+    let spec = spec.clone().unbind();
+    let (outcome, objects) = stack::run(py, move || {
+        let (value, objects) = Python::attach(|py| to_value(spec.bind(py)))?;
         let outcome = openapi_spec_validator_rs::validate(&value, &options);
         // Freeing a large document takes a while too: do it before re-attaching.
         drop(value);
-        Ok(outcome)
+        Ok((outcome, objects))
     })?;
     check_interrupt(retriever.as_ref())?;
-    into_errors(py, outcome)
+    into_errors(py, outcome, objects)
 }
 
 enum BytesFailure {
@@ -144,19 +154,20 @@ fn validate_bytes(
 ) -> PyResult<Vec<CoreError>> {
     let version = version.map(parse_version).transpose()?;
     let retriever = self::retriever(retriever);
-    let result = stack::run(py, || {
+    let worker_retriever = retriever.clone();
+    let result = stack::run(py, move || {
         Ok(load_and_validate(
             &data,
             &stream_name,
             version,
             base_uri,
             all_errors,
-            retriever.as_ref(),
+            worker_retriever.as_ref(),
         ))
     })?;
     check_interrupt(retriever.as_ref())?;
     match result {
-        Ok(outcome) => into_errors(py, outcome),
+        Ok(outcome) => into_errors(py, outcome, PythonObjects::default()),
         Err(BytesFailure::Load(error)) => Err(exception(py, "SpecReadError", (error.message,))),
         // Upstream raises `ValidatorDetectError()` without a message.
         Err(BytesFailure::Detect(DetectError::NotFound)) => {
@@ -192,9 +203,11 @@ fn load<'py>(
     data: PyBackedBytes,
     stream_name: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let loaded = stack::run(py, || {
+    let loaded = stack::run(py, move || {
         match openapi_spec_validator_rs::load(&data, &stream_name) {
-            Ok(spec) => Python::attach(|py| Ok(Ok(to_python(py, &spec)?.unbind()))),
+            Ok(spec) => Python::attach(|py| {
+                Ok(Ok(to_python(py, &spec, &PythonObjects::default())?.unbind()))
+            }),
             Err(error) => Ok(Err(error)),
         }
     })?;
@@ -223,7 +236,9 @@ fn cli_main(
     retriever: Option<Py<PyAny>>,
 ) -> PyResult<(i32, String, String, bool)> {
     let retriever = self::retriever(retriever);
-    let result = py.detach(|| {
+    let worker_retriever = retriever.clone();
+    let result = stack::run(py, move || {
+        let retriever = worker_retriever;
         let argv =
             std::iter::once("openapi-spec-validator-rs").chain(args.iter().map(String::as_str));
         let ran = Args::try_parse_from(argv).is_ok();
@@ -248,13 +263,13 @@ fn cli_main(
                 &mut err,
             ),
         };
-        (
+        Ok((
             code,
             String::from_utf8_lossy(&out).into_owned(),
             String::from_utf8_lossy(&err).into_owned(),
             ran,
-        )
-    });
+        ))
+    })?;
     check_interrupt(retriever.as_ref())?;
     Ok(result)
 }
