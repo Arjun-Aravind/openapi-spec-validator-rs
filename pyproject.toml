@@ -44,6 +44,8 @@ manifest-path = "crates/openapi-spec-validator-rs-py/Cargo.toml"
 python-source = "python"
 module-name = "openapi_spec_validator_rs._core"
 features = ["pyo3/extension-module"]
+# Symbols only add size to the wheels; panics still report their message.
+strip = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
