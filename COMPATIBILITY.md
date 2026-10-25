@@ -92,7 +92,7 @@ These behaviours look surprising but are reproduced on purpose:
 | Documents nested beyond the reading limit | Reading stops as soon as containers nest deeper than the 9,989 levels upstream's JSON round trip accepts (mappings flattened by merge keys not counted, as the round trip does not see them), with its `maximum recursion depth exceeded while encoding a JSON object` (exit 1), without scanning the rest of the file: libyaml's scanner slows quadratically with the nesting of mappings (100,000 levels took 25 s before; PyYAML scans at the same speed but crashes at about 50,000 levels, after about 5 s). Upstream reads the whole file first, so it would instead report what it meets elsewhere: a YAML syntax error or a second document further on, an unknown tag, an unhashable mapping key or an unserialisable value above the deep part, or nothing at all when the deep part sits under a duplicated key it discards. The limit itself mirrors `python -m openapi_spec_validator` on CPython 3.13 (9,989 for files, 9,992 for standard input); upstream's console script runs three frames shallower and accepts three levels more, and other CPython versions differ by a few levels. | Pathological documents |
 | Exponential schemas | Some recursive schemas make jsonschema's algorithm revisit the same subschemas at every level, for example two `allOf` members that each refer back to the schema: validating a `default` nested 20 levels deep then takes a second here (over 20 s upstream), and each further level doubles it. This port runs the same algorithm, so both tools slow down on the same documents. | Pathological documents |
 | Recursion limit elsewhere | `$ref` chains and recursion while validating a `default` hit Python's limit as upstream does. The thresholds are measured for references and `default`s at a component (a chain of 978 `$ref`s, a `default` 490 `$ref`s or 246 levels of a recursive schema deep); upstream's limit counts the frames above, so elsewhere in a document it can be a few levels off. | Pathological documents |
-| NaN / Infinity, huge integers | YAML `.nan`/`.inf` and numbers too large for a float (`1e400`) load as `null`, and integers beyond 64 bits as floats. So a `default: .nan` fails with `None for not nullable` where upstream accepts it, and `format: int64` accepts `-9223372036854775809` (a float here) where upstream rejects it. An explicit `!!int` with non-ASCII digits (`!!int '١٢'`) is a read error here; upstream reads 12. | Rare |
+| NaN / Infinity, huge integers | YAML `.nan`/`.inf` and numbers too large for a float (`1e400`) load as `null`, and integers beyond 64 bits as floats. So a `default: .nan` fails with `None for not nullable` where upstream accepts it, and `format: int64` accepts `-9223372036854775809` (a float here) where upstream rejects it. | Rare |
 | Error output | Messages, "Failed validating ..." blocks, best-match hints and error order follow upstream; on the APIs.guru corpus the complete output is byte-identical for every rejected spec except in the two cases in this table. For errors at the top level of the document, upstream prints its meta-schema as `<Proxy at 0x... wrapping {...}>`, with a memory address, which cannot be reproduced. Python's `FutureWarning: Possible nested set` for patterns like `[[:alpha:]]` is not printed. Upstream crashes while printing an error about a value nested about 9,000 levels deep; this port prints it. | Output text only |
 | Set ordering | Where upstream iterates a Python set, its output changes from run to run with the hash seed: the list of undefined `required` properties, unexpected additional properties in OpenAPI 3.0 and Swagger 2.0 (3.1 sorts them), and which property is checked first under `additionalProperties`. This port uses document order. | Output text only |
 | Windows | Upstream decodes standard input (`-`) with the console or ANSI code page unless Python's UTF-8 mode is on, and writes `\r\n` line endings; this port decodes standard input as UTF-8 and writes `\n`. Files are read the same way on every platform. Not tested on Windows yet. | Non-ASCII specs piped through `-`; line endings |
@@ -108,13 +108,15 @@ reasons in `tests/upstream_shim/upstream_suite.py`; they are the differences bel
 | Upstream | This package |
 |---|---|
 | `validate(spec, base_uri="", cls=None)` | Same |
-| `validate_url(spec_url, cls=None)` | Same: fetched with `urllib.request.urlopen` (`http`, `https`, `file`) and parsed exactly as upstream parses it. `cls` only selects the version. |
-| `$ref`s to other documents | Same: files are read from disk and `http(s)://` documents are fetched, lazily, through `openapi_spec_validator_rs.handlers`, which uses `requests` when it is importable and `urllib` otherwise, exactly as jsonschema-path's default handlers, with the URL joined as `urljoin` joins it. A `SchemaPath` passed in is read through its own base URI; custom handlers attached to it are not used. A `KeyboardInterrupt` during a download takes effect when the download ends or times out (10 seconds), since the download runs on a validation thread; upstream reacts at once. |
+| `validate_url(spec_url, cls=None)` | Same: fetched with `urllib.request.urlopen` (`http`, `https`, `file`) and parsed exactly as upstream parses it, reading only as far as PyYAML would (a stream libyaml cannot decode, `/dev/zero` say, is given up on at its first bad bytes rather than read to the end). `cls` only selects the version. |
+| `$ref`s to other documents | Same: files are read from disk and `http(s)://` documents are fetched, lazily, through `openapi_spec_validator_rs.handlers`, which uses `requests` when it is importable and `urllib` otherwise, exactly as jsonschema-path's default handlers, with the URL joined as `urljoin` joins it. A `SchemaPath` passed in is read through its own base URI; custom handlers attached to it are not used. Validation runs on a thread of its own while the calling thread handles signals, so Ctrl-C (`KeyboardInterrupt`) takes effect at once, as it does upstream; the validation under way then finishes unobserved (a download within it ends or times out after 10 seconds) and its result is dropped. |
 | | `validate_path(path, cls=None)`: reads a file like the command line, resolving relative `$ref`s against it |
 | `validate_spec`, `validate_spec_url` (deprecated) | Same, with the same warnings (and, like upstream, `validate_spec` ignores `base_uri` unless `validator` is given) |
 | `OpenAPIV2SpecValidator`, `OpenAPIV30SpecValidator`, `OpenAPIV31SpecValidator`, `OpenAPIV32SpecValidator`, `OpenAPIV3SpecValidator` | Same constructor `(schema, base_uri="")` and `validate()`, `is_valid()`, `iter_errors()`. A jsonschema-path `SchemaPath` is accepted too. |
 | `openapi_v2_spec_validator`, `openapi_v30_spec_validator`, ... (deprecated) | Same |
 | `get_validator_cls`, `versions.get_spec_version`, `SpecVersion`, `OPENAPIV2` ... `OPENAPIV32` | Same |
+| `readers.read_from_filename`, `readers.read_from_stdin` | Same: the document (parsed like the command line's files) and its base URI |
+| Module layout: `validation.validators`, `validation.exceptions`, `validation.proxies`, `versions.consts`, `versions.datatypes`, `versions.exceptions`, `versions.shortcuts` | Same names, so an import path only changes its first segment. `validation.keywords` (the keyword validator classes), `validation.caches`, `validation.registries`, `versions.finders` and `settings` have no counterpart: the walk is implemented in Rust |
 | `OpenAPISpecValidatorError`, `ValidatorDetectError`, `OpenAPIValidationError`, `ExtraParametersError`, `ParameterDuplicateError`, `UnresolvableParameterError`, `DuplicateOperationIDError` | Same names and hierarchy, in `openapi_spec_validator_rs.exceptions` and at the top level |
 
 ### Exceptions
@@ -143,7 +145,15 @@ Where upstream raises something other than a validation error, this package rais
 
 Documents are read the way `json.loads` output looks: `dict` with `str` keys, `list`,
 `str`, `int`, `float`, `bool` and `None`, including subclasses (`OrderedDict`, `StrEnum`,
-`IntEnum`, ...). Beyond that:
+`IntEnum`, ...). An object of any other type that is not a number, such as the
+`datetime.date` that `yaml.safe_load` makes of an unquoted `2020-01-01`, `bytes` or a
+`set`, is handled as jsonschema handles it: it is of no type, so it passes wherever no
+type is required (`example`, `x-` extensions, an untyped `default`) and fails wherever one
+is, with its `repr()` in the message (`datetime.date(2020, 1, 1) is not of type 'string'`);
+equal objects are equal to `enum`; and the error's `instance` is the object itself. The
+`TypeError` upstream raises when such an object sits where its walk expects a mapping or
+a string (`'datetime.date' object is not iterable`) is raised with the same message, as
+`ValidationAbortedError` like every other failure. Beyond that:
 
 | Input | This package | Upstream |
 |---|---|---|
@@ -151,7 +161,9 @@ Documents are read the way `json.loads` output looks: `dict` with `str` keys, `l
 | NaN, ±infinity | `null`, like the file reader (see above) | Kept as floats |
 | Integers beyond 64 bits | The nearest float, like the file reader | Kept as integers |
 | Non-`str` keys (e.g. `200:` from `yaml.safe_load`) | `TypeError` naming the location | A `TypeError` from jsonschema in most positions, accepted where no schema applies |
-| Other types (`set`, `bytes`, `datetime`, `Decimal`, custom objects) | `TypeError` naming the location | Accepted where no schema applies (e.g. in extensions), type errors elsewhere |
+| Other numbers (`Decimal`, `Fraction`, `complex`, NumPy scalars) | `TypeError` naming the location | Numbers to jsonschema, compared and printed as such |
+| An object of another type as a schema keyword's value (`required: <date>`, `type: <date>`) | The meta-schema error; where upstream's walk then fails on it, usually the same message, not always | Depends on the keyword |
+| An empty `bytes` or `set` where upstream tests truthiness (`exclusiveMinimum: b''`), a `set` where it hashes (`enum: [{1}]`) | Treated as true and hashable | False, unhashable |
 | Circular structures | `ValueError` | Accepted where no schema applies |
 | `IntEnum` / `StrEnum` members | Shown in messages as their value (`1`) | Shown as the member (`<Num.ONE: 1>`) |
 | More than 9,989 nested containers | `RecursionError` | Depends on where the nesting is |

@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `openapi_spec_validator_rs.readers` (`read_from_filename`, `read_from_stdin`) and the
+  `validation` and `versions` sub-packages with upstream's module names
+  (`validation.validators`, `validation.exceptions`, `validation.proxies`,
+  `versions.consts`, `versions.datatypes`, `versions.exceptions`, `versions.shortcuts`), so
+  that upstream's documented imports work with the package name changed.
+- The Python API accepts documents holding objects of types JSON has no counterpart for,
+  as `yaml.safe_load` produces them: a `datetime.date` or `datetime.datetime` from an
+  unquoted timestamp, `bytes`, a `set`, any other object. They are handled as jsonschema
+  handles them, of no type: accepted in `example`, extensions and untyped `default`s,
+  rejected with their `repr()` wherever a type is required
+  (`datetime.date(2020, 1, 1) is not of type 'string'`), equal to themselves in `enum`,
+  and returned as the error's `instance`. Such documents raised `TypeError` before; about
+  one valid YAML spec in ten holds a date once loaded with `yaml.safe_load`.
+- `read_until_unreadable` in the Rust library: reads a stream only as far as PyYAML's
+  reader would get.
+
+### Fixed
+
+- Documents and `$ref` targets are read only as far as PyYAML would read them: a file or
+  body that libyaml cannot decode (`/dev/zero`, a binary) is given up on at its first bad
+  bytes, with upstream's message, instead of being read until memory runs out.
+- Ctrl-C (`KeyboardInterrupt`) takes effect at once in the Python API and the
+  `pip`-installed command line, as it does upstream, rather than when the validation under
+  way returns; the signal was ignored for the whole run, 10 seconds for a stalled download.
+- A `dependencies` or `dependentRequired` failure is worded as Python's jsonschema words
+  it (`'minimum' is a dependency of 'exclusiveMinimum'`); it was reported as a missing
+  required property.
+- Validating a `default` against an OpenAPI 3.0 (or Swagger 2.0) schema with
+  `type: 'null'` fails like upstream (`Unknown type 'null' for validator with schema`,
+  exit status 2) instead of accepting the type.
+- `int()` and `float()` emulations accept every script's decimal digits and whitespace as
+  Python's do: a `$ref` pointer segment such as `/parameters/٠`, and `!!int` / `!!float`
+  tagged scalars, no longer fail where upstream reads them.
+- The command line no longer panics when no thread can be started (a process limit
+  reached): it validates the files one after another on its own thread.
+- The libyaml wrapper owns the parser through a raw pointer, as libyaml keeps a pointer to
+  the parser inside it: moving the box that held it broke Rust's aliasing rules (reported
+  by Miri; no misbehaviour was observed).
+- GitHub Actions in the workflows are pinned to commits, kept current by Dependabot.
+
 ## [0.2.1] - 2026-10-25
 
 ### Fixed

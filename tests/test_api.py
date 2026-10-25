@@ -478,3 +478,57 @@ def _load(path: Path) -> Any:
     from openapi_spec_validator_rs import _core
 
     return _core.load(path.read_bytes(), "<urllib response>")
+
+
+def test_upstream_module_layout(write, make_spec) -> None:
+    # Upstream's modules, so that `openapi_spec_validator.x` becomes `openapi_spec_validator_rs.x`.
+    from openapi_spec_validator_rs import readers, validation, versions
+    from openapi_spec_validator_rs.validation import exceptions, proxies, validators
+    from openapi_spec_validator_rs.versions import consts, datatypes, shortcuts
+
+    assert validation.OpenAPIV31SpecValidator is osv.OpenAPIV31SpecValidator
+    assert validators.OpenAPIV30SpecValidator is osv.OpenAPIV30SpecValidator
+    assert exceptions.OpenAPIValidationError is osv.OpenAPIValidationError
+    assert proxies.openapi_v31_spec_validator is osv.openapi_v31_spec_validator
+    assert consts.OPENAPIV30 is OPENAPIV30
+    assert datatypes.SpecVersion is versions.SpecVersion
+    assert shortcuts.get_spec_version is versions.get_spec_version
+
+    path = write("openapi.json", json.dumps(make_spec(**{"x-when": "2020-01-01"})))
+    spec, base_uri = readers.read_from_filename(path)
+    assert spec["x-when"] == "2020-01-01"
+    assert base_uri == path.resolve().as_uri()
+    osv.validate(spec, base_uri=base_uri)
+    with pytest.raises(OSError, match="^No such file: missing.yaml$"):
+        readers.read_from_filename("missing.yaml")
+
+
+def test_keyboard_interrupt_takes_effect_at_once(make_spec, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Validation runs on its own thread; the calling thread handles signals meanwhile,
+    # as upstream's pure-Python validation can be interrupted anywhere.
+    import os
+    import signal
+    import time
+
+    from openapi_spec_validator_rs import handlers
+
+    download_ended = threading.Event()
+
+    def slow(url: str) -> bytes:
+        time.sleep(4)
+        download_ended.set()
+        return b"{}"
+
+    monkeypatch.setattr(handlers, "retrieve", slow)
+    spec = make_spec(components={"schemas": {"A": {"$ref": "http://127.0.0.1:9/a.json"}}})
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signal handlers run on the main thread only")
+    timer = threading.Timer(0.1, lambda: os.kill(os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            osv.validate(spec)
+    finally:
+        timer.cancel()
+    # Raised while the download was still under way, not once it had returned.
+    assert not download_ended.is_set()

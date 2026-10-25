@@ -6,6 +6,7 @@ classes, messages, ``validator``, instance and schema paths, ``context`` and ``s
 
 from __future__ import annotations
 
+import datetime
 import os
 import sys
 from collections.abc import Callable
@@ -193,4 +194,103 @@ CORE_DIFFERENCES = [
 def test_core_differences(spec: dict[str, Any]) -> None:
     expected = outcome(first_error, upstream, spec, "")
     actual = outcome(first_error, osv, spec, "")
+    assert actual == expected
+
+
+DATE = datetime.date(2020, 1, 1)
+DATETIME = datetime.datetime(2020, 1, 1, 10, 0, tzinfo=datetime.timezone.utc)
+
+
+def _swagger(**fields: Any) -> dict[str, Any]:
+    spec = {"swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {}}
+    spec.update(fields)
+    return spec
+
+
+# Python objects of types JSON has no counterpart for, as `yaml.safe_load` produces them
+# for unquoted timestamps: of no type to jsonschema, printed as their repr.
+PYTHON_OBJECTS = [
+    pytest.param(_spec("3.0.3", **{"x-when": DATE}), id="extension"),
+    pytest.param(
+        _spec("3.0.3", components={"schemas": {"A": {"type": "string", "example": DATE}}}),
+        id="example",
+    ),
+    pytest.param(
+        _spec("3.1.0", components={"schemas": {"A": {"type": "string", "examples": [DATE, DATETIME]}}}),
+        id="examples-31",
+    ),
+    pytest.param(
+        _spec("3.0.3", components={"schemas": {"A": {"type": "string", "default": DATE}}}),
+        id="default-30",
+    ),
+    pytest.param(
+        _spec("3.1.0", components={"schemas": {"A": {"type": "string", "default": DATETIME}}}),
+        id="default-31",
+    ),
+    pytest.param(
+        _swagger(definitions={"A": {"type": "string", "default": DATE}}), id="default-20"
+    ),
+    pytest.param(
+        _spec(
+            "3.0.3",
+            components={
+                "schemas": {
+                    "A": {"properties": {"a": {"type": "string"}}, "required": ["a"], "default": DATE}
+                }
+            },
+        ),
+        id="default-untyped-30",
+    ),
+    pytest.param(
+        _spec(
+            "3.1.0",
+            components={
+                "schemas": {
+                    "A": {"properties": {"a": {"type": "string"}}, "required": ["a"], "default": DATE}
+                }
+            },
+        ),
+        id="default-untyped-31",
+    ),
+    pytest.param(
+        _spec("3.0.3", components={"schemas": {"A": {"enum": [DATETIME], "default": DATE}}}),
+        id="default-enum",
+    ),
+    pytest.param(
+        _spec("3.0.3", components={"schemas": {"A": {"type": "string", "format": "binary", "default": b"ab"}}}),
+        id="default-binary-bytes",
+    ),
+    pytest.param(
+        _spec("3.0.3", components={"schemas": {"A": {"type": "array", "items": {"type": "string"}, "default": [DATE]}}}),
+        id="default-list",
+    ),
+    pytest.param(_spec("3.0.3", info={"title": "t", "version": DATE}), id="info-version"),
+    pytest.param(_spec("3.0.3", info={"title": b"t", "version": "1"}), id="bytes-title"),
+    pytest.param(_spec("3.0.3", info={"title": [DATE], "version": "1"}), id="list-title"),
+    pytest.param(_spec("3.0.3", info=DATE), id="info-30"),
+    pytest.param(_spec("3.1.0", info=DATE), id="info-31"),
+    pytest.param(_swagger(info=DATE), id="info-20"),
+    pytest.param(
+        _spec("3.0.3", servers=[{"url": "http://a/{v}", "variables": {"v": {"default": DATE}}}]),
+        id="server-variable",
+    ),
+    pytest.param(_spec("3.0.3", components={"schemas": {"A": DATE}}), id="schema-30"),
+    pytest.param(_spec("3.1.0", components={"schemas": {"A": DATE}}), id="schema-31"),
+    pytest.param(_spec("3.0.3", **{"x-set": {1, 2}}), id="set"),
+    pytest.param(
+        _spec("3.0.3", components={"schemas": {"A": {"type": "object", "required": DATE}}}),
+        id="keyword-value",
+    ),
+    # Not listed: a date where the walk reads a string (`tags: [{name: <date>}]`), whose
+    # `TypeError` this package raises as `ValidationAbortedError`, as for any other value.
+    pytest.param({"openapi": DATE, "info": {"title": "t", "version": "1"}, "paths": {}}, id="version"),
+    pytest.param(DATE, id="root"),
+]
+
+
+@pytest.mark.parametrize("run", [first_error, all_errors], ids=lambda f: f.__name__)
+@pytest.mark.parametrize("spec", PYTHON_OBJECTS)
+def test_python_objects(spec: Any, run: Callable[..., list[Any]]) -> None:
+    expected = outcome(run, upstream, spec, "")
+    actual = outcome(run, osv, spec, "")
     assert actual == expected

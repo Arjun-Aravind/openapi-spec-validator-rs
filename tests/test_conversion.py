@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import enum
+import fractions
 import math
 from collections import OrderedDict
 from typing import Any
@@ -75,13 +78,98 @@ def test_non_string_keys_are_rejected(make_spec) -> None:
 
 @pytest.mark.parametrize(
     ("value", "type_name"),
-    [({1, 2}, "set"), (b"x", "bytes"), (object(), "object"), (1j, "complex")],
+    [(1j, "complex"), (decimal.Decimal("1.5"), "Decimal"), (fractions.Fraction(1, 2), "Fraction")],
 )
-def test_unsupported_types_are_rejected(make_spec, value: Any, type_name: str) -> None:
+def test_other_numbers_are_rejected(make_spec, value: Any, type_name: str) -> None:
+    # Numbers to jsonschema, which the document model cannot express.
     with pytest.raises(
         TypeError, match=f"^unsupported type '{type_name}' at spec\\['x-a'\\]\\[1\\]"
     ):
         osv.validate(make_spec(**{"x-a": [0, value]}))
+
+
+DATE = datetime.date(2020, 1, 1)
+DATETIME = datetime.datetime(2020, 1, 1, 10, 0, tzinfo=datetime.timezone.utc)
+
+
+class Thing:
+    def __repr__(self) -> str:
+        return "Thing()"
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (DATE, "datetime.date(2020, 1, 1)"),
+        (DATETIME, "datetime.datetime(2020, 1, 1, 10, 0, tzinfo=datetime.timezone.utc)"),
+        (b"t", "b't'"),
+        ({1}, "{1}"),
+        (Thing(), "Thing()"),
+        ([DATE, "x"], "[datetime.date(2020, 1, 1), 'x']"),
+    ],
+    ids=["date", "datetime", "bytes", "set", "object", "list"],
+)
+def test_other_objects_have_no_type(make_spec, value: Any, shown: str) -> None:
+    # What `yaml.safe_load` makes of an unquoted `2020-01-01`, and anything else JSON
+    # has no counterpart for: no type to jsonschema, shown as its repr, and the error
+    # carries the object itself, as upstream's does.
+    error = title_error(make_spec, value)
+    assert error.message == f"{shown} is not of type 'string'"
+    assert str(error).endswith(f"On instance['info']['title']:\n    {shown}")
+    if isinstance(value, list):
+        assert error.instance[0] is value[0]
+    else:
+        assert error.instance is value
+
+
+def test_other_objects_pass_where_no_type_applies(make_spec) -> None:
+    osv.validate(
+        make_spec(
+            **{"x-when": DATE},
+            components={
+                "schemas": {
+                    "A": {"type": "string", "example": DATE},
+                    # Keywords that only concern mappings are skipped for a date.
+                    "B": {"properties": {"a": {"type": "string"}}, "required": ["a"], "default": DATE},
+                    "C": {"enum": [DATE, "x"], "default": DATE},
+                    "D": {"type": "string", "format": "binary", "default": b"ab"},
+                }
+            },
+        )
+    )
+    errors = list(osv.OpenAPIV30SpecValidator(make_spec(info=DATE)).iter_errors())
+    assert [e.message for e in errors] == ["datetime.date(2020, 1, 1) is not of type 'object'"]
+    with pytest.raises(OpenAPIValidationError) as info:
+        osv.validate(make_spec(components={"schemas": {"A": {"enum": [DATETIME], "default": DATE}}}))
+    assert info.value.message == (
+        "datetime.date(2020, 1, 1) is not one of "
+        "[datetime.datetime(2020, 1, 1, 10, 0, tzinfo=datetime.timezone.utc)]"
+    )
+
+
+def test_yaml_safe_load_documents(make_spec, write) -> None:
+    yaml = pytest.importorskip("yaml")
+    path = write(
+        "dates.yaml",
+        "openapi: 3.0.3\n"
+        "info: {title: t, version: '1'}\n"
+        "paths: {}\n"
+        "x-reviewed: 2020-01-01\n"
+        "components:\n"
+        "  schemas:\n"
+        "    A: {type: string, format: date, example: 2020-01-01}\n"
+        "    B: {type: string, default: 2020-01-01T10:00:00Z}\n",
+    )
+    spec = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(spec["x-reviewed"], datetime.date)
+    with pytest.raises(OpenAPIValidationError) as info:
+        osv.validate(spec)
+    assert info.value.message == (
+        "datetime.datetime(2020, 1, 1, 10, 0, tzinfo=datetime.timezone.utc) "
+        "is not of type 'string'"
+    )
+    del spec["components"]["schemas"]["B"]
+    osv.validate(spec)
 
 
 def test_circular_references_are_rejected(make_spec) -> None:

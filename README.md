@@ -88,13 +88,19 @@ The package mirrors openapi-spec-validator's API:
 ```python
 from openapi_spec_validator_rs import validate, validate_path, validate_url
 from openapi_spec_validator_rs import OpenAPIV31SpecValidator, OpenAPIValidationError
+from openapi_spec_validator_rs.readers import read_from_filename
 
 validate(spec_dict)                     # raises the first error
 validate_path("openapi.yaml")           # reads the file like the command line
 validate_url("https://example.com/openapi.json")
 
-errors = list(OpenAPIV31SpecValidator(spec_dict).iter_errors())
+spec_dict, base_uri = read_from_filename("openapi.yaml")
+errors = list(OpenAPIV31SpecValidator(spec_dict, base_uri=base_uri).iter_errors())
 ```
+
+`spec_dict` can be anything `json.load` or `yaml.safe_load` returns, dates and all: a
+`datetime.date` from an unquoted `2020-01-01` is treated as jsonschema treats it (of no
+type, shown as `datetime.date(2020, 1, 1)` in messages).
 
 Errors are `OpenAPIValidationError` (or one of its subclasses: `DuplicateOperationIDError`,
 `ParameterDuplicateError`, `UnresolvableParameterError`, `ExtraParametersError`) with the
@@ -179,8 +185,10 @@ The validator is a Rust library (`crates/openapi-spec-validator-rs`) with a CLI 
 PyO3 bindings on top. It follows the reference implementation step by step:
 
 1. **Load**: JSON goes through serde_json when libyaml would read it the same way; anything
-   else goes through libyaml (the parser inside PyYAML) with PyYAML's YAML 1.1 rules, then
-   through the same JSON round trip.
+   else goes through libyaml (the parser inside PyYAML, as the [unsafe-libyaml] crate's
+   mechanical translation of its C code: archived upstream, which is also what keeps it
+   identical to the parser PyYAML bundles) with PyYAML's YAML 1.1 rules, then through
+   the same JSON round trip. Streams are read only as far as that parser would get.
 2. **Meta-schema**: the whole document is validated against the official schema for its
    version with the [`jsonschema`](https://crates.io/crates/jsonschema) crate.
 3. **Walk**: the document is walked like `keywords.py`, following `$ref`s (into other
@@ -208,3 +216,4 @@ and [NOTICE][notice].
 [compatibility]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/COMPATIBILITY.md
 [license]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/LICENSE
 [notice]: https://github.com/Arjun-Aravind/openapi-spec-validator-rs/blob/main/NOTICE
+[unsafe-libyaml]: https://crates.io/crates/unsafe-libyaml
