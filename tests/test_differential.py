@@ -356,6 +356,11 @@ def _gives_up(mod: Any, entry: str, spec: Any, frames_above: int) -> bool:
     return False
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 12),
+    reason="before 3.12 Python also counts some C calls against the recursion limit, so "
+    "upstream gives up up to a level earlier; this package follows 3.12 and later",
+)
 @pytest.mark.parametrize(
     ("version", "entry", "frames_above", "limit"),
     [
