@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use openapi_spec_validator_rs::{Cancelled, run_cancellable};
-use pyo3::exceptions::PyRuntimeError;
+use openapi_spec_validator_rs::{Cancelled, check_cancelled, run_cancellable};
+use pyo3::exceptions::{PyImportError, PyRuntimeError};
 use pyo3::prelude::*;
 
 /// Documents may nest almost 10 000 containers deep (the reader's limit), and loading,
@@ -31,6 +31,10 @@ where
     T: Send + 'static,
     F: FnOnce() -> PyResult<T> + Send + 'static,
 {
+    // Upstream builds its settings (a lazy pydantic import) for every read and
+    // validation, which fails like this once the interpreter is shutting down. Starting
+    // the work instead would have the worker call back into a dying interpreter.
+    refuse_while_finalizing()?;
     let cancel = Arc::new(AtomicBool::new(false));
     let (sender, mut receiver) = mpsc::channel();
     let handle = {
@@ -83,4 +87,34 @@ where
             },
         }
     }
+}
+
+/// The `ImportError` upstream raises for any read or validation once the interpreter is
+/// shutting down.
+pub fn refuse_while_finalizing() -> PyResult<()> {
+    if finalizing() {
+        return Err(PyImportError::new_err(
+            "sys.meta_path is None, Python is likely shutting down",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the interpreter is shutting down (or gone).
+fn finalizing() -> bool {
+    // SAFETY: `Py_IsInitialized` only reads the runtime's state and may be called from any
+    // thread, attached or not.
+    unsafe { pyo3::ffi::Py_IsInitialized() == 0 }
+}
+
+/// `Python::attach` for the worker thread of [`run`]: when the call was cancelled, or the
+/// interpreter has started shutting down meanwhile (a daemon thread's validation), the
+/// work stops instead. Attaching to a finalizing interpreter blocks forever or ends the
+/// thread under Rust's feet, depending on the Python version.
+pub fn attach<R>(f: impl for<'py> FnOnce(Python<'py>) -> R) -> R {
+    check_cancelled();
+    if finalizing() {
+        std::panic::resume_unwind(Box::new(Cancelled));
+    }
+    Python::attach(f)
 }

@@ -8,6 +8,7 @@ __all__ = ["CoreError", "__version__", "cli_main", "load", "validate", "validate
 __version__: Final[str]
 
 def _check_interpreter() -> None: ...
+def _check_finalizing() -> None: ...
 
 @final
 class CoreError:

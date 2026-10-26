@@ -192,3 +192,41 @@ def test_keyboard_interrupt_stops_the_work(make_spec) -> None:
     time.sleep(1.0)
     # The interrupted work stopped: the process is idle.
     assert cpu() - start < 0.3
+
+
+AT_EXIT = """
+import os
+import openapi_spec_validator_rs as osv
+from openapi_spec_validator_rs.readers import read_from_filename
+
+spec = {{"openapi": "3.0.3", "info": {{"title": "t", "version": "1"}}, "paths": {{}}}}
+if {used}:
+    osv.validate(spec)
+
+
+class Late:
+    def __del__(self, write=os.write, osv=osv, read=read_from_filename, spec=spec):
+        for call in (lambda: osv.validate(spec), lambda: read({path!r})):
+            try:
+                call()
+                result = "ok"
+            except BaseException as e:
+                result = type(e).__name__ + ": " + str(e)
+            write(1, result.encode() + b"\\n")
+
+
+keep = Late()
+"""
+
+
+@pytest.mark.parametrize("used", [False, True], ids=["fresh", "used"])
+def test_calls_while_the_interpreter_shuts_down(used: bool, tmp_path: Path) -> None:
+    # Upstream fails its lazy settings import there; the extension must neither hang nor
+    # panic calling back into a dying interpreter.
+    path = tmp_path / "spec.json"
+    path.write_text('{"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "paths": {}}')
+    script = AT_EXIT.format(used=used, path=str(path))
+    run = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    refused = "ImportError: sys.meta_path is None, Python is likely shutting down"
+    assert run.stdout.splitlines() == [refused, refused], run.stdout + run.stderr

@@ -114,9 +114,13 @@ impl ContextHandle {
     }
 }
 
-/// Stops the calling validation if it was cancelled.
+/// Stops the calling validation if it was cancelled: unwinds with [`Cancelled`] inside
+/// [`run_cancellable`], and does nothing elsewhere.
+///
+/// Not a supported API: used by the Python bindings before calling back into Python.
+#[doc(hidden)]
 #[inline]
-pub(crate) fn check() {
+pub fn check() {
     let cancelled = CURRENT.with(|current| {
         current
             .borrow()

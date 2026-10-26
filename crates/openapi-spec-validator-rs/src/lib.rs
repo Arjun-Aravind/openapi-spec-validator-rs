@@ -61,7 +61,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 pub use crate::context::{
-    Cancelled, ContextHandle, PythonStack, run_cancellable, with_python_stack,
+    Cancelled, ContextHandle, PythonStack, check as check_cancelled, run_cancellable,
+    with_python_stack,
 };
 use crate::context::{Context, python_stack};
 use crate::document::Documents;

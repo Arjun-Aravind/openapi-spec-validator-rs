@@ -38,7 +38,8 @@ impl PyRetriever {
 
 impl Retrieve for PyRetriever {
     fn retrieve(&self, url: &str) -> Result<Vec<u8>, RetrieveError> {
-        Python::attach(|py| {
+        // Called from the worker thread of `stack::run`.
+        crate::stack::attach(|py| {
             let result = self
                 .callable
                 .call1(py, (url,))

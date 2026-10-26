@@ -159,7 +159,7 @@ fn validate(
     );
     let spec = spec.clone().unbind();
     let (outcome, objects) = stack::run(py, move || {
-        let (value, objects) = Python::attach(|py| to_value(spec.bind(py)))?;
+        let (value, objects) = stack::attach(|py| to_value(spec.bind(py)))?;
         let outcome = with_python_stack(stack, || {
             openapi_spec_validator_rs::validate(&value, &options)
         });
@@ -248,7 +248,7 @@ fn load<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let loaded = stack::run(py, move || {
         match openapi_spec_validator_rs::load(&data, &stream_name) {
-            Ok(spec) => Python::attach(|py| {
+            Ok(spec) => stack::attach(|py| {
                 Ok(Ok(to_python(py, &spec, &PythonObjects::default())?.unbind()))
             }),
             Err(error) => Ok(Err(error)),
@@ -317,6 +317,13 @@ fn cli_main(
     Ok(result)
 }
 
+/// Raises upstream's `ImportError` once the interpreter is shutting down, for Python code
+/// that would otherwise fail differently before reaching the extension.
+#[pyfunction]
+fn _check_finalizing() -> PyResult<()> {
+    stack::refuse_while_finalizing()
+}
+
 /// The interpreter the extension was initialised in.
 static HOME_INTERPRETER: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
 
@@ -349,6 +356,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = HOME_INTERPRETER.get_or_init(current_interpreter);
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(_check_interpreter, m)?)?;
+    m.add_function(wrap_pyfunction!(_check_finalizing, m)?)?;
     m.add_class::<CoreError>()?;
     m.add_function(wrap_pyfunction!(validate, m)?)?;
     m.add_function(wrap_pyfunction!(validate_bytes, m)?)?;
