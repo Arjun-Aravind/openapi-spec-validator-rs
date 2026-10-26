@@ -45,6 +45,8 @@ impl Crash {
 pub(crate) struct LookupError {
     class: Option<&'static str>,
     message: String,
+    /// A `TypeError`: the pointer went through a value that cannot be indexed.
+    type_error: bool,
 }
 
 impl LookupError {
@@ -52,6 +54,7 @@ impl LookupError {
         Self {
             class: Some(class),
             message,
+            type_error: false,
         }
     }
 
@@ -82,6 +85,7 @@ impl From<Crash> for LookupError {
         Self {
             class: None,
             message,
+            type_error: false,
         }
     }
 }
@@ -123,6 +127,8 @@ pub(crate) struct Documents<'a> {
     externals: Arena<External>,
     /// Document index by URI (without fragment): 0 is the root, `n` is `externals[n - 1]`.
     by_uri: RefCell<HashMap<String, usize>>,
+    /// How many documents (in index order) jsonschema-path's registry has crawled.
+    crawled: std::cell::Cell<usize>,
     /// The one-character strings that pointers into strings resolve to: Python indexes
     /// a `str` like a sequence and yields a new `str` each time.
     characters: Arena<Value>,
@@ -141,6 +147,7 @@ impl<'a> Documents<'a> {
             retriever,
             externals: Arena::new(),
             by_uri: RefCell::new(by_uri),
+            crawled: std::cell::Cell::new(0),
             characters: Arena::new(),
         }
     }
@@ -170,6 +177,18 @@ impl<'a> Documents<'a> {
     /// `Resolver.lookup(ref)` for a resolver whose base URI is `base`, which `$id`s met
     /// while validating may have moved away from every document's URI.
     pub fn lookup_from(&self, base: &str, reference: &str) -> Result<Node<'_>, LookupError> {
+        self.lookup_with(base, reference, false)
+    }
+
+    /// `Resolver.lookup(ref)`; with `subresources`, entering a schema subresource on the
+    /// way reads its `$id` as jsonschema-path's Draft 2020-12 resources do (see
+    /// [`Documents::pointer`]).
+    fn lookup_with(
+        &self,
+        base: &str,
+        reference: &str,
+        subresources: bool,
+    ) -> Result<Node<'_>, LookupError> {
         let unresolvable = || LookupError::referencing("Unresolvable", reference.to_owned());
         let (uri, fragment) = match reference.strip_prefix('#') {
             Some(fragment) => (base.to_owned(), fragment.to_owned()),
@@ -179,11 +198,19 @@ impl<'a> Documents<'a> {
                 pyurl::urldefrag(&joined).map_err(Crash)?
             }
         };
+        // `Registry.get_or_retrieve`: a document not held yet is looked for by crawling
+        // those held first.
+        let held = self
+            .known(&uri)
+            .is_some_and(|doc| self.document(doc).is_some());
+        if subresources && !held {
+            self.crawl()?;
+        }
         let doc = self.document_index(&uri);
         // A document that could not be read or parsed is `Unretrievable`, which
         // `referencing` reports as `Unresolvable(ref)`.
         let contents = self.document(doc).ok_or_else(unresolvable)?;
-        self.fragment(doc, contents, &fragment)
+        self.fragment(doc, contents, &fragment, subresources)
     }
 
     /// The URI documents are known by, as `$id`s and `$ref`s are joined with it
@@ -197,6 +224,25 @@ impl<'a> Documents<'a> {
             return Some(self.root);
         }
         self.externals.get(doc - 1).value.as_ref().ok()
+    }
+
+    /// The index of the document at `uri`, if it was asked for before.
+    fn known(&self, uri: &str) -> Option<usize> {
+        self.by_uri.borrow().get(uri).copied()
+    }
+
+    /// `Registry.crawl()` of jsonschema-path's registry: every document held and not
+    /// crawled yet is walked for its Draft 2020-12 subresources, reading their `$id`s and
+    /// anchors, which fails for a subresource that is neither a mapping nor a boolean.
+    fn crawl(&self) -> Result<(), LookupError> {
+        let held = 1 + self.externals.len();
+        for doc in self.crawled.get()..held {
+            if let Some(contents) = self.document(doc) {
+                crawl_resource(contents)?;
+            }
+        }
+        self.crawled.set(held);
+        Ok(())
     }
 
     /// The index of the document at `uri`, retrieving it on first use like
@@ -249,9 +295,30 @@ impl<'a> Documents<'a> {
             if depth > MAX_REF_DEPTH {
                 return Err(Crash::recursion());
             }
-            node = self.lookup(node.doc, reference)?;
+            node = self.lookup_with(self.uri(node.doc), reference, true)?;
         }
         Ok(node)
+    }
+
+    /// [`Documents::resolve`] for a membership test (`key in path`): jsonschema-path
+    /// answers `False` when following the path raises `KeyError`, `IndexError` or
+    /// `TypeError`, of which resolving can only raise the last (a pointer through a value
+    /// that cannot be indexed). `None` then: the node has no keys.
+    pub fn resolve_member<'d>(&'d self, mut node: Node<'d>) -> Result<Option<Node<'d>>, Crash> {
+        crate::context::check();
+        let mut depth = 0;
+        while let Some(reference) = as_ref(node.value) {
+            depth += 1;
+            if depth > MAX_REF_DEPTH {
+                return Err(Crash::recursion());
+            }
+            node = match self.lookup_with(self.uri(node.doc), reference, true) {
+                Ok(node) => node,
+                Err(error) if error.type_error => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+        }
+        Ok(Some(node))
     }
 
     /// `Resolver.lookup(ref)` from `referencing`, relative to document `doc`.
@@ -265,6 +332,7 @@ impl<'a> Documents<'a> {
         doc: usize,
         contents: &'d Value,
         fragment: &str,
+        subresources: bool,
     ) -> Result<Node<'d>, LookupError> {
         if fragment.is_empty() {
             return Ok(Node {
@@ -273,6 +341,10 @@ impl<'a> Documents<'a> {
             });
         }
         if !fragment.starts_with('/') {
+            // `Registry.anchor` crawls before looking the anchor up.
+            if subresources {
+                self.crawl()?;
+            }
             // Anchors (`#foo`) are only found via `$id`/`$anchor` resources, which
             // upstream's registry would have to crawl; none exist in a plain spec.
             if fragment.contains('/') {
@@ -294,14 +366,25 @@ impl<'a> Documents<'a> {
                 ),
             ));
         }
-        let value = self.pointer(contents, fragment)?;
+        let value = self.pointer(contents, fragment, subresources)?;
         Ok(Node { value, doc })
     }
 
     /// `Resource.pointer` from `referencing`: each segment indexes a mapping by key or a
     /// sequence by position. A Python `str` is a sequence too, so a pointer can reach
     /// into a string and come out with one of its characters.
-    fn pointer<'d>(&'d self, document: &'d Value, pointer: &str) -> Result<&'d Value, LookupError> {
+    ///
+    /// With `subresources`, each step is followed by Draft 2020-12's
+    /// `maybe_in_subresource`, the specification jsonschema-path gives the documents it
+    /// reads: a step into a schema subresource (under `properties`, `definitions`,
+    /// `allOf`, `items` and the like) reads the value's `$id`, which fails for anything
+    /// but a mapping or a boolean.
+    fn pointer<'d>(
+        &'d self,
+        document: &'d Value,
+        pointer: &str,
+        subresources: bool,
+    ) -> Result<&'d Value, LookupError> {
         let nowhere = || {
             let mut message = format!(
                 "{} does not exist within {}",
@@ -334,7 +417,11 @@ impl<'a> Documents<'a> {
         };
         let decoded = percent_decode_str(&pointer[1..]).decode_utf8_lossy();
         let mut contents = document;
+        // The segments since the last subresource, as `maybe_in_subresource` sees them:
+        // positions in sequences are `None` (Python makes them `int`s).
+        let mut segments: Vec<Option<String>> = Vec::new();
         for segment in decoded.split('/') {
+            let indexed = matches!(contents, Value::Array(_) | Value::String(_));
             contents = match contents {
                 Value::Array(items) => position(segment, items.len())?
                     .map(|i| &items[i])
@@ -351,13 +438,38 @@ impl<'a> Documents<'a> {
                     self.characters.get(index)
                 }
                 other => {
-                    return Err(Crash(format!(
-                        "'{}' object is not subscriptable",
-                        python_type_name(other)
-                    ))
-                    .into());
+                    return Err(LookupError {
+                        class: None,
+                        message: format!(
+                            "'{}' object is not subscriptable",
+                            python_type_name(other)
+                        ),
+                        type_error: true,
+                    });
                 }
             };
+            if subresources {
+                segments.push((!indexed).then(|| segment.replace("~1", "/").replace("~0", "~")));
+                if enters_subresource(&segments) {
+                    match contents {
+                        Value::Bool(_) => {}
+                        // An `$id` makes a new resolver (with a new base URI, which this
+                        // port does not follow), and the segments start over.
+                        Value::Object(map) if pyrepr::foreign(contents).is_none() => {
+                            if map.get("$id").is_some_and(|id| !id.is_null()) {
+                                segments.clear();
+                            }
+                        }
+                        other => {
+                            return Err(Crash(format!(
+                                "'{}' object has no attribute 'get'",
+                                python_type_name(other)
+                            ))
+                            .into());
+                        }
+                    }
+                }
+            }
         }
         Ok(contents)
     }
@@ -482,6 +594,10 @@ impl<T> Arena<T> {
         let items = unsafe { &*self.items.get() };
         &items[index]
     }
+    fn len(&self) -> usize {
+        // SAFETY: see `push`.
+        unsafe { &*self.items.get() }.len()
+    }
 }
 
 fn strip_fragment(uri: &str) -> &str {
@@ -506,6 +622,126 @@ fn local_file(uri: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     url.to_file_path().ok()
+}
+
+/// The `AttributeError` of `value.attribute` on a value that has no such attribute.
+fn no_attribute(value: &Value, attribute: &str) -> LookupError {
+    Crash(format!(
+        "'{}' object has no attribute '{attribute}'",
+        python_type_name(value)
+    ))
+    .into()
+}
+
+/// The crawl of one resource (`Registry.crawl`, Draft 2020-12): `id()`, `anchors()` and
+/// `subresources()` of each resource met, last found first.
+fn crawl_resource(contents: &Value) -> Result<(), LookupError> {
+    // The subresources Draft 2020-12 finds in a schema's values, subarrays and
+    // subobjects (`_subresources_of`).
+    const IN_VALUE: [&str; 11] = [
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    ];
+    const IN_SUBARRAY: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
+    const IN_SUBVALUES: [&str; 5] = [
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "patternProperties",
+        "properties",
+    ];
+    // A key of a mapping iterated as a subarray: a `str`, which has no `get`.
+    static STRING: Value = Value::String(String::new());
+    let mut uncrawled = vec![contents];
+    while let Some(resource) = uncrawled.pop() {
+        let map = match resource {
+            Value::Bool(_) => continue,
+            Value::Object(map) if pyrepr::foreign(resource).is_none() => map,
+            // `_dollar_id`: `contents.get("$id")`.
+            other => return Err(no_attribute(other, "get")),
+        };
+        for key in IN_VALUE {
+            if let Some(value) = map.get(key) {
+                uncrawled.push(value);
+            }
+        }
+        for key in IN_SUBARRAY {
+            match map.get(key) {
+                None => {}
+                Some(Value::Array(items)) => uncrawled.extend(items),
+                Some(Value::Object(keys)) if pyrepr::foreign(&map[key]).is_none() => {
+                    uncrawled.extend(keys.keys().map(|_| &STRING));
+                }
+                Some(Value::String(text)) => {
+                    uncrawled.extend(text.chars().map(|_| &STRING));
+                }
+                Some(other) => {
+                    return Err(Crash(format!(
+                        "'{}' object is not iterable",
+                        python_type_name(other)
+                    ))
+                    .into());
+                }
+            }
+        }
+        for key in IN_SUBVALUES {
+            match map.get(key) {
+                None => {}
+                Some(Value::Object(values)) if pyrepr::foreign(&map[key]).is_none() => {
+                    uncrawled.extend(values.values());
+                }
+                Some(other) => return Err(no_attribute(other, "values")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Draft 2020-12's `maybe_in_subresource` (`referencing.jsonschema`): whether the pointer
+/// segments since the last subresource lead into a new one.
+fn enters_subresource(segments: &[Option<String>]) -> bool {
+    const IN_VALUE: [&str; 11] = [
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    ];
+    const IN_SUBARRAY: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
+    const IN_SUBVALUES: [&str; 5] = [
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "patternProperties",
+        "properties",
+    ];
+    let mut segments = segments.iter();
+    while let Some(segment) = segments.next() {
+        let segment = segment.as_deref();
+        let in_value = segment.is_some_and(|s| IN_VALUE.contains(&s));
+        let in_child =
+            segment.is_some_and(|s| IN_SUBARRAY.contains(&s) || IN_SUBVALUES.contains(&s));
+        // `segment not in in_value and (segment not in in_child or next(...) is None)`
+        if !in_value && (!in_child || segments.next().is_none()) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

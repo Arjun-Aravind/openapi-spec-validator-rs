@@ -264,8 +264,14 @@ pub(super) fn timestamp_value(s: &str) -> Result<Timestamp, String> {
             seconds = -seconds;
         }
         if seconds.abs() >= 86_400 {
+            // Python 3.14 dropped the final period.
+            let period = if crate::context::python_minor() < 14 {
+                "."
+            } else {
+                ""
+            };
             return Err(format!(
-                "offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), not {}.",
+                "offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), not {}{period}",
                 timedelta_repr(seconds)
             ));
         }

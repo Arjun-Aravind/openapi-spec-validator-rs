@@ -384,10 +384,6 @@ impl<'d> Oas30<'d, '_, '_> {
                 }
             }
             "type" => {
-                let Value::String(name) = value else {
-                    // The type checker's map hashes it.
-                    return Err(Crash(pyobj::unhashable(value, pyobj::Hashed::Plain)));
-                };
                 if instance.is_null() {
                     if schema.get("nullable") == Some(&Value::Bool(true)) {
                         return Ok(());
@@ -400,6 +396,16 @@ impl<'d> Oas30<'d, '_, '_> {
                         return Ok(());
                     }
                 }
+                let Value::String(name) = value else {
+                    // The type checker's map hashes it: a list or dict cannot be hashed,
+                    // anything else is a type it does not know.
+                    return Err(match value {
+                        Value::Array(_) | Value::Object(_) => {
+                            Crash(pyobj::unhashable(value, pyobj::Hashed::Plain))
+                        }
+                        _ => unknown_type(value, instance, schema),
+                    });
+                };
                 // "Pragmatic": `bytes` pass as a string with `format: binary`.
                 let binary_bytes = name == "string"
                     && schema.get("format").and_then(Value::as_str) == Some("binary")
@@ -419,7 +425,18 @@ impl<'d> Oas30<'d, '_, '_> {
                 if schema.contains_key("discriminator") {
                     self.discriminator(instance, schema, doc, errors)?;
                 } else {
-                    let subschemas = value.as_array().map(Vec::as_slice).unwrap_or_default();
+                    // Python iterates whatever it is given: the first of a dict's keys or
+                    // a string's characters then fails as a schema, anything else raises.
+                    let subschemas: &[Value] = match value {
+                        Value::Array(items) => items,
+                        other => {
+                            let items = pyobj::iterate(other).map_err(Crash)?;
+                            if let Some(first) = items.first() {
+                                return Err(not_a_schema(first));
+                            }
+                            &[]
+                        }
+                    };
                     match keyword {
                         "allOf" => {
                             for (index, subschema) in subschemas.iter().enumerate() {
@@ -627,7 +644,13 @@ impl<'d> Oas30<'d, '_, '_> {
                     return Ok(());
                 }
                 let Value::String(format) = value else {
-                    return Ok(());
+                    // `format not in checkers` hashes it; nothing else is checked.
+                    return match value {
+                        Value::Array(_) | Value::Object(_) => {
+                            Err(Crash(pyobj::unhashable(value, pyobj::Hashed::DictKey)))
+                        }
+                        _ => Ok(()),
+                    };
                 };
                 let (outcome, cause) = formats::check_format_with_cause(
                     FormatSet::Oas30,

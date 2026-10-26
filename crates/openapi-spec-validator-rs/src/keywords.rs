@@ -131,6 +131,18 @@ impl<'d, 'a> Walker<'d, 'a> {
         })
     }
 
+    /// `node`, resolved for the membership tests (`key in path`) that are all upstream
+    /// does with it first: when following its reference raises the `TypeError` those
+    /// tests swallow, an empty mapping.
+    fn resolve_member(&self, node: Node<'d>) -> Result<Node<'d>, Crash> {
+        static EMPTY: std::sync::LazyLock<Value> =
+            std::sync::LazyLock::new(|| Value::Object(serde_json::Map::new()));
+        Ok(self.docs.resolve_member(node)?.unwrap_or(Node {
+            value: &EMPTY,
+            doc: node.doc,
+        }))
+    }
+
     /// `path[key]`: the resolved child value, `KeyError` if missing.
     fn item(&self, node: Node<'d>, key: &str) -> Result<&'d Value, Crash> {
         Ok(self.child(node, key)?.value)
@@ -271,7 +283,7 @@ impl<'d, 'a> Walker<'d, 'a> {
                 return Err(Stop::Crash(String::new()));
             };
             if OPERATIONS.contains(&field) || (v32 && field == "query") {
-                let operation = self.resolve(operation)?;
+                let operation = self.resolve_member(operation)?;
                 self.nested(|walker| walker.operation(url, field, operation, parameters))?;
             } else if v32 && field == "additionalOperations" {
                 let operations = self.resolve(operation)?;
@@ -279,7 +291,7 @@ impl<'d, 'a> Walker<'d, 'a> {
                     let Key::Str(name) = name else {
                         return Err(Stop::Crash(String::new()));
                     };
-                    let operation = self.resolve(operation)?;
+                    let operation = self.resolve_member(operation)?;
                     self.nested(|walker| walker.operation(url, name, operation, parameters))?;
                 }
             }
@@ -372,10 +384,16 @@ impl<'d, 'a> Walker<'d, 'a> {
             let parameter = self.resolve(parameter)?;
             self.nested(|walker| walker.parameter(parameter))?;
 
-            let name = self.item(parameter, "name")?;
-            let location = self.item(parameter, "in")?;
-            // jsonschema-path hands out lists and mappings as `SchemaPath`s, which are
-            // hashable and equal only to the same path: such a key is never a duplicate.
+            // `parameter[key]`: jsonschema-path hands out lists and mappings (a `$ref`
+            // included, unresolved) as `SchemaPath`s, which are hashable and equal only
+            // to the same path: such a key is never a duplicate.
+            let raw = |key: &str| {
+                pyobj::as_dict(parameter.value)
+                    .and_then(|map| map.get(key))
+                    .ok_or_else(|| Crash::key_error(key))
+            };
+            let name = raw("name")?;
+            let location = raw("in")?;
             let container = |v: &Value| v.is_array() || pyobj::as_dict(v).is_some();
             if container(name) || container(location) {
                 continue;
@@ -422,7 +440,7 @@ impl<'d, 'a> Walker<'d, 'a> {
             if !matches!(code, Key::Str(_)) {
                 return Err(Stop::Crash(String::new()));
             }
-            let response = self.resolve(response)?;
+            let response = self.resolve_member(response)?;
             self.nested(|walker| walker.response(response))?;
         }
         Ok(())
@@ -448,7 +466,7 @@ impl<'d, 'a> Walker<'d, 'a> {
             if !matches!(mimetype, Key::Str(_)) {
                 return Err(Stop::Crash(String::new()));
             }
-            let media_type = self.resolve(media_type)?;
+            let media_type = self.resolve_member(media_type)?;
             self.nested(|walker| walker.media_type(media_type))?;
         }
         Ok(())
