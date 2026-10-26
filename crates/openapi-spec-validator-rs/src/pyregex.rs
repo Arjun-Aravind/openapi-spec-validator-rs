@@ -295,6 +295,25 @@ mod tests {
     }
 
     #[test]
+    fn python_3_14_syntax() {
+        use crate::context::with_python_minor;
+        // `\z` is a bad escape until 3.14, then the end of the string.
+        assert_eq!(PyRegex::compile("x\\z").unwrap_err().msg, "bad escape \\z");
+        with_python_minor(14, || {
+            let re = PyRegex::compile("x\\z").expect("valid in 3.14");
+            assert_eq!(re.search("x"), Ok(true));
+            assert_eq!(re.search("x\n"), Ok(false));
+            assert!(PyRegex::compile("[\\z]").is_err());
+        });
+        // `\B` matches the empty string from 3.14 on.
+        assert!(!search("\\B", ""));
+        with_python_minor(14, || {
+            assert!(PyRegex::compile("\\B").unwrap().search("").unwrap());
+            assert!(!PyRegex::compile("\\B").unwrap().search("a").unwrap());
+        });
+    }
+
+    #[test]
     fn regex_is_shareable() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PyRegex>();

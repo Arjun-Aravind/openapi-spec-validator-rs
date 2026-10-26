@@ -112,6 +112,7 @@ pub(crate) fn translate(parsed: &Parsed, harden: bool) -> Result<String, String>
         out: String::new(),
         open_groups: Vec::new(),
         harden,
+        empty_non_boundary: parsed.empty_non_boundary,
     };
     if let Some((negate, items)) = charset_prefix_quirk(parsed) {
         // `_compile_info` compiles the leading charset with the global flags,
@@ -274,6 +275,8 @@ struct Translator {
     /// Capturing groups enclosing the node being translated.
     open_groups: Vec<u32>,
     harden: bool,
+    /// `\B` matches the empty string (Python 3.14).
+    empty_non_boundary: bool,
 }
 
 fn has_capture(nodes: &[Node]) -> bool {
@@ -707,6 +710,10 @@ impl Translator {
             At::EndString => out.push_str(r"\z"),
             At::Boundary => {
                 let _ = write!(out, r"(?:(?<={word})(?!{word})|(?<!{word})(?={word}))");
+            }
+            // Until Python 3.14, `\B` never matches the empty string.
+            At::NonBoundary if self.empty_non_boundary => {
+                let _ = write!(out, r"(?:(?<={word})(?={word})|(?<!{word})(?!{word}))");
             }
             At::NonBoundary => {
                 let _ = write!(

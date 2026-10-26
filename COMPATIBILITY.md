@@ -10,6 +10,28 @@ The reference is upstream's default installation (`pip install openapi-spec-vali
 on CPython 3.13), i.e. the pure-Python `jsonschema` backend without optional format
 packages such as `rfc3987` or `fqdn`.
 
+### Python versions
+
+Upstream's output depends a little on the Python it runs on, because parts of the standard
+library it relies on changed in Python 3.14:
+
+* `urljoin` keeps the root when a `$ref` has more `../` segments than its base has
+  directories (3.13 produced a relative `file:` URL, opened relative to the working
+  directory), and keeps an empty `?` or `#`;
+* `urlopen` drops the query of a `file:` URL instead of reading it as part of the file name;
+* `\z` is a valid end-of-string escape in patterns, and `\B` matches the empty string;
+* several messages are worded differently: `argument of type 'NoneType' is not a
+  container or iterable`, `cannot use 'list' as a dict key (unhashable type: 'list')`,
+  `division by zero`, and the date and time errors (`month must be in 1..12, not 13`,
+  `day 30 must be in range 1..29 for month 2 in year 2020`).
+
+The Python package (and with it the `pip`-installed command and the pre-commit hook)
+follows the interpreter it runs on: 3.10 to 3.13 behave as 3.13, 3.14 and later as 3.14.
+The Rust binary follows 3.13 unless given `--python-version 3.14`. Python 3.15 changed
+nothing more that upstream depends on, but PyYAML 6.0.3 has no compiled parser for it, so
+upstream on 3.15 falls back to PyYAML's pure-Python parser: its YAML error messages are
+worded differently and very deep documents fail sooner, until PyYAML publishes 3.15 wheels.
+
 ## Checks
 
 Every keyword validator in upstream's `openapi_spec_validator/validation/keywords.py` is
@@ -90,6 +112,7 @@ These behaviours look surprising but are reproduced on purpose:
 | Draft 3 schemas in 3.1+ | A schema declaring `"$schema": "http://json-schema.org/draft-03/schema#"` is reported as an unknown dialect, and inside a `default`'s schema such a subschema keeps the surrounding dialect. Upstream validates it as Draft 3. | None seen in practice |
 | Extremely deep nesting | Upstream checks a document against its meta-schema, and each schema against its dialect's, by recursion, and gives up with `Error: maximum recursion depth exceeded` (exit 2) once that recursion passes Python's limit: around 122 levels of `properties` or `allOf` in 3.0 (163 through `items`), 162 in 2.0, 61 to 81 in 3.1 and 3.2, fewer the deeper in the document the schema sits. This port replays that recursion with a model of the frames each step of jsonschema's traversal uses (`crates/openapi-spec-validator-rs/src/frames.rs`, fitted to measurements of upstream with `scripts/frames/`) and gives up where upstream does, reporting instead an error upstream finds first. The model predicts upstream's deepest stack exactly for 7,869 of the 7,881 checks in a sample of 120 APIs.guru specs (the others are one frame short, where upstream re-checks a `oneOf` branch with `is_valid`), and on 228 generated shapes (versions, nesting keywords, valid and invalid leaves, schemas in components and responses, both output modes) it gives up at the same depth as upstream, with identical output just below, at and above it. The command line counts frames as upstream's console script does (`openapi-spec-validator`, two frames shallower with `--validation-errors all`); `python -m openapi_spec_validator` runs two frames deeper. The Python API counts the caller's own frames and `sys.getrecursionlimit()`, as upstream's recursion does; on interpreters before 3.12, which also count some C calls, upstream gives up up to one level earlier than this package (measured on 3.10). | Pathological documents |
 | Documents nested beyond the reading limit | Reading stops as soon as containers nest deeper than the 9,989 levels upstream's JSON round trip accepts (mappings flattened by merge keys not counted, as the round trip does not see them), with its `maximum recursion depth exceeded while encoding a JSON object` (exit 1), without scanning the rest of the file: libyaml's scanner slows quadratically with the nesting of mappings (100,000 levels took 25 s before; PyYAML scans at the same speed but crashes at about 50,000 levels, after about 5 s). Upstream reads the whole file first, so it would instead report what it meets elsewhere: a YAML syntax error or a second document further on, an unknown tag, an unhashable mapping key or an unserialisable value above the deep part, or nothing at all when the deep part sits under a duplicated key it discards. The limit itself mirrors `python -m openapi_spec_validator` on CPython 3.13 (9,989 for files, 9,992 for standard input); upstream's console script runs three frames shallower and accepts three levels more, and other CPython versions differ by a few levels. | Pathological documents |
+| Python 3.14 and later | On 3.14 upstream reads documents nested deeper than the 9,989 levels its JSON round trip accepts on 3.13, up to a limit set by the C stack (which varies by platform and thread), and then fails in ways that depend on it: a traceback while printing the error, or an `Error:` with an empty message. This port keeps the 3.13 reading limit. Patterns follow Unicode 15.1 (CPython 3.13) for `\w`, `\d` and case-insensitive matching, where 3.14 uses Unicode 16: only characters assigned in Unicode 16 match differently. A `file:` URL counts as local when its host is empty, `localhost` or `127.0.0.1`; Python also accepts this machine's name and addresses. On Windows, `file:` URLs are read as standard file URLs rather than with Python's `nturl2path` rules. | Pathological documents |
 | Exponential schemas | Some recursive schemas make jsonschema's algorithm revisit the same subschemas at every level, for example two `allOf` members that each refer back to the schema: validating a `default` nested 20 levels deep then takes a second here (over 20 s upstream), and each further level doubles it. This port runs the same algorithm, so both tools slow down on the same documents. | Pathological documents |
 | Recursion limit elsewhere | `$ref` chains and recursion while validating a `default` hit Python's limit as upstream does. The thresholds are measured for references and `default`s at a component (a chain of 978 `$ref`s, a `default` 490 `$ref`s or 246 levels of a recursive schema deep); upstream's limit counts the frames above, so elsewhere in a document it can be a few levels off. | Pathological documents |
 | NaN / Infinity, huge integers | YAML `.nan`/`.inf` and numbers too large for a float (`1e400`) load as `null`, and integers beyond 64 bits as floats. So a `default: .nan` fails with `None for not nullable` where upstream accepts it, and `format: int64` accepts `-9223372036854775809` (a float here) where upstream rejects it. | Rare |

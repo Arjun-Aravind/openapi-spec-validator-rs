@@ -70,7 +70,10 @@ pub fn with_python_minor<T>(minor: u32, f: impl FnOnce() -> T) -> T {
 }
 
 /// The Python 3 minor version the current validation follows.
-pub(crate) fn python_minor() -> u32 {
+///
+/// Not a supported API: used by the command line.
+#[doc(hidden)]
+pub fn python_minor() -> u32 {
     CURRENT
         .with(|current| current.borrow().python_minor)
         .unwrap_or(DEFAULT_PYTHON_MINOR)

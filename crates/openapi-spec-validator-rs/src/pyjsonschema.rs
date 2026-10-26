@@ -883,7 +883,9 @@ impl<'d> Evaluator<'d, '_, '_> {
                     }
                 }
                 // `format not in self.checkers` hashes the value.
-                Value::Array(_) | Value::Object(_) => return Err(unhashable(value)),
+                Value::Array(_) | Value::Object(_) => {
+                    return Err(unhashable(value, pyobj::Hashed::DictKey));
+                }
                 _ => {}
             },
             "if" => {
@@ -1056,7 +1058,10 @@ impl<'d> Evaluator<'d, '_, '_> {
                 for name in types.iter() {
                     let known = match name {
                         Value::String(name) => class.is_type(instance, name),
-                        Value::Array(_) | Value::Object(_) => return Err(unhashable(name)),
+                        // The type checker's map hashes it.
+                        Value::Array(_) | Value::Object(_) => {
+                            return Err(unhashable(name, pyobj::Hashed::Plain));
+                        }
                         _ => None,
                     };
                     match known {
@@ -1577,7 +1582,7 @@ fn contains(container: &Value, key: &str) -> Result<bool, Crash> {
 fn contains_key(object: &Map<String, Value>, item: &Value) -> Result<bool, Crash> {
     match item {
         Value::String(key) => Ok(object.contains_key(key)),
-        Value::Array(_) | Value::Object(_) => Err(unhashable(item)),
+        Value::Array(_) | Value::Object(_) => Err(unhashable(item, pyobj::Hashed::DictKey)),
         _ => Ok(false),
     }
 }
@@ -1590,14 +1595,11 @@ fn no_attribute(value: &Value, attribute: &str) -> Crash {
 }
 
 fn not_iterable_argument(value: &Value) -> Crash {
-    Crash(format!(
-        "argument of type '{}' is not iterable",
-        python_type_name(value)
-    ))
+    Crash(pyobj::not_a_container(value))
 }
 
-fn unhashable(value: &Value) -> Crash {
-    Crash(format!("unhashable type: '{}'", python_type_name(value)))
+fn unhashable(value: &Value, hashed: pyobj::Hashed) -> Crash {
+    Crash(pyobj::unhashable(value, hashed))
 }
 
 /// `UnknownType(type, instance, schema)`, rendered like jsonschema.

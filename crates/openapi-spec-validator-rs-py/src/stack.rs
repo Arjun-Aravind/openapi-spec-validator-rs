@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use openapi_spec_validator_rs::{
     Cancelled, LARGE_STACK_SIZE, check_cancelled, on_large_stack_thread, run_cancellable,
+    with_python_minor,
 };
 use pyo3::exceptions::{PyImportError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -38,6 +39,8 @@ where
     // validation, which fails like this once the interpreter is shutting down. Starting
     // the work instead would have the worker call back into a dying interpreter.
     refuse_while_finalizing()?;
+    // Where the standard library changed between versions, follow the running one.
+    let minor = u32::from(py.version_info().minor);
     let cancel = Arc::new(AtomicBool::new(false));
     let (sender, mut receiver) = mpsc::channel();
     // Shared with the thread so that it is still here if the thread cannot start.
@@ -57,7 +60,9 @@ where
             .spawn(move || {
                 let f = take(&work);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_cancellable(cancel, || on_large_stack_thread(f))
+                    run_cancellable(cancel, || {
+                        with_python_minor(minor, || on_large_stack_thread(f))
+                    })
                 }));
                 match outcome {
                     // The receiver is gone when the caller was interrupted: nobody to
@@ -78,7 +83,7 @@ where
         // recursion to threads of its own, and signals wait until the work is done.
         Err(_) => {
             let f = take(&work);
-            return py.detach(move || run_cancellable(cancel, f));
+            return py.detach(move || run_cancellable(cancel, || with_python_minor(minor, f)));
         }
     };
     loop {

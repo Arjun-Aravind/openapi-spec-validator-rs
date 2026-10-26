@@ -214,3 +214,16 @@ fn remote_ref_invalid_default() {
 fn remote_ref_unresolvable() {
     insta::assert_snapshot!(cli_remote(&["-"], REMOTE_REF, &[]));
 }
+
+#[test]
+fn python_version_selects_the_standard_library() {
+    // Python 3.13's urllib reads the query as part of the file name; 3.14 drops it.
+    let default = cli(&["query-ref.yaml"]);
+    assert!(default.starts_with("exit code: 2\n"), "{default}");
+    assert!(
+        default.contains("Error: query-ref-target.yaml?v=1"),
+        "{default}"
+    );
+    let py314 = cli(&["--python-version", "3.14", "query-ref.yaml"]);
+    assert!(py314.starts_with("exit code: 0\n"), "{py314}");
+}

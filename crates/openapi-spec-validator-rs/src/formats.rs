@@ -222,18 +222,44 @@ fn is_date(s: &str) -> Check {
     }
 }
 
-/// CPython `_datetimemodule.c` `check_date_args`.
-fn check_date_args(year: u32, month: u32, day: u32) -> Result<(), String> {
+/// CPython `_datetimemodule.c` `check_date_args`: the `ValueError` of an invalid date.
+/// Python 3.14 words them with the values.
+pub(crate) fn check_date_args(year: u32, month: u32, day: u32) -> Result<(), String> {
+    let modern = crate::context::python_minor() >= 14;
     if !(1..=9999).contains(&year) {
-        return Err(format!("year {year} is out of range"));
+        return Err(if modern {
+            format!("year must be in 1..9999, not {year}")
+        } else {
+            format!("year {year} is out of range")
+        });
     }
     if !(1..=12).contains(&month) {
-        return Err("month must be in 1..12".to_owned());
+        return Err(if modern {
+            format!("month must be in 1..12, not {month}")
+        } else {
+            "month must be in 1..12".to_owned()
+        });
     }
-    if day < 1 || day > days_in_month(year, month) {
-        return Err("day is out of range for month".to_owned());
+    let days = days_in_month(year, month);
+    if day < 1 || day > days {
+        return Err(if modern {
+            format!("day {day} must be in range 1..{days} for month {month} in year {year}")
+        } else {
+            "day is out of range for month".to_owned()
+        });
     }
     Ok(())
+}
+
+/// CPython `check_time_args` for one field, `0..=max`.
+pub(crate) fn check_time_field(name: &str, value: u32, max: u32) -> Result<(), String> {
+    if value <= max {
+        Ok(())
+    } else if crate::context::python_minor() >= 14 {
+        Err(format!("{name} must be in 0..{max}, not {value}"))
+    } else {
+        Err(format!("{name} must be in 0..{max}"))
+    }
 }
 
 fn days_in_month(year: u32, month: u32) -> u32 {
@@ -318,10 +344,10 @@ fn is_draft3_time(s: &str) -> Check {
         let rest: String = chars[end..].iter().collect();
         return Check::Raised(format!("unconverted data remains: {rest}"));
     }
-    if second > 59 {
-        return Check::Raised("second must be in 0..59".to_owned());
+    match check_time_field("second", second, 59) {
+        Ok(()) => Check::Pass,
+        Err(message) => Check::Raised(message),
     }
-    Check::Pass
 }
 
 /// Backtracking match of the `%H:%M:%S` regex at the start of `chars`; returns the match end

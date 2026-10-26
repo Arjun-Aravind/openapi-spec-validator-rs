@@ -152,8 +152,18 @@ pub(crate) fn urlunparse(parsed: &Parsed) -> String {
     url
 }
 
-/// `urljoin(base, url)`.
+/// `urljoin(base, url)`, as the Python version being followed joins.
 pub(crate) fn urljoin(base: &str, url: &str) -> Result<String, String> {
+    if crate::context::python_minor() >= 14 {
+        urljoin_314(base, url)
+    } else {
+        urljoin_313(base, url)
+    }
+}
+
+/// `urljoin` up to Python 3.13: more `..` segments than the base has directories remove
+/// the root too (`file:x`), and an empty query or fragment is dropped.
+fn urljoin_313(base: &str, url: &str) -> Result<String, String> {
     if base.is_empty() {
         return Ok(url.to_owned());
     }
@@ -224,9 +234,169 @@ pub(crate) fn urldefrag(url: &str) -> Result<(String, String), String> {
     if !url.contains('#') {
         return Ok((url.to_owned(), String::new()));
     }
+    if crate::context::python_minor() >= 14 {
+        let mut split = Split::of(url)?;
+        let fragment = split.fragment.take().unwrap_or_default();
+        return Ok((split.join(), fragment));
+    }
     let mut parsed = urlparse(url, "")?;
     let fragment = std::mem::take(&mut parsed.fragment);
     Ok((urlunparse(&parsed), fragment))
+}
+
+/// Python 3.14's `_urlsplit(url)`: components a URL does not have are `None`, so that an
+/// empty query or fragment (`x?`, `x#`) survives a split and a join.
+struct Split {
+    scheme: Option<String>,
+    netloc: Option<String>,
+    path: String,
+    query: Option<String>,
+    fragment: Option<String>,
+}
+
+impl Split {
+    fn of(url: &str) -> Result<Self, String> {
+        let url: String = url
+            .trim_start_matches(is_c0_or_space)
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+            .collect();
+        let mut scheme = None;
+        let mut rest = url.as_str();
+        if let Some(i) = url.find(':') {
+            if i > 0
+                && url.as_bytes()[0].is_ascii_alphabetic()
+                && url[..i].chars().all(is_scheme_char)
+            {
+                scheme = Some(url[..i].to_ascii_lowercase());
+                rest = &url[i + 1..];
+            }
+        }
+        let mut netloc = None;
+        if let Some(after) = rest.strip_prefix("//") {
+            let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+            if after[..end].contains('[') != after[..end].contains(']') {
+                return Err("Invalid IPv6 URL".to_owned());
+            }
+            netloc = Some(after[..end].to_owned());
+            rest = &after[end..];
+        }
+        let (rest, fragment) = match rest.split_once('#') {
+            Some((rest, fragment)) => (rest, Some(fragment.to_owned())),
+            None => (rest, None),
+        };
+        let (path, query) = match rest.split_once('?') {
+            Some((path, query)) => (path, Some(query.to_owned())),
+            None => (rest, None),
+        };
+        Ok(Self {
+            scheme,
+            netloc,
+            path: path.to_owned(),
+            query,
+            fragment,
+        })
+    }
+
+    /// `_urlunsplit`.
+    fn join(&self) -> String {
+        let mut url = match &self.netloc {
+            Some(netloc) => {
+                let slash = if !self.path.is_empty() && !self.path.starts_with('/') {
+                    "/"
+                } else {
+                    ""
+                };
+                format!("//{netloc}{slash}{}", self.path)
+            }
+            None if self.path.starts_with("//") => format!("//{}", self.path),
+            None => self.path.clone(),
+        };
+        if let Some(scheme) = self.scheme.as_deref().filter(|scheme| !scheme.is_empty()) {
+            url = format!("{scheme}:{url}");
+        }
+        if let Some(query) = &self.query {
+            url = format!("{url}?{query}");
+        }
+        if let Some(fragment) = &self.fragment {
+            url = format!("{url}#{fragment}");
+        }
+        url
+    }
+}
+
+/// `urljoin` from Python 3.14: the root survives any number of `..` segments, an empty
+/// query or fragment is kept, and `;params` are part of the path.
+fn urljoin_314(base: &str, url: &str) -> Result<String, String> {
+    if base.is_empty() {
+        return Ok(url.to_owned());
+    }
+    if url.is_empty() {
+        return Ok(base.to_owned());
+    }
+    let b = Split::of(base)?;
+    let mut u = Split::of(url)?;
+    if u.scheme.is_none() {
+        u.scheme.clone_from(&b.scheme);
+    }
+    let scheme = u.scheme.as_deref().unwrap_or_default();
+    if u.scheme != b.scheme || (!scheme.is_empty() && !USES_RELATIVE.contains(&scheme)) {
+        return Ok(url.to_owned());
+    }
+    if scheme.is_empty() || USES_NETLOC.contains(&scheme) {
+        if u.netloc.as_deref().is_some_and(|netloc| !netloc.is_empty()) {
+            return Ok(u.join());
+        }
+        u.netloc.clone_from(&b.netloc);
+    }
+    if u.path.is_empty() {
+        u.path.clone_from(&b.path);
+        if u.query.is_none() {
+            u.query.clone_from(&b.query);
+            if u.fragment.is_none() {
+                u.fragment.clone_from(&b.fragment);
+            }
+        }
+        return Ok(u.join());
+    }
+    let mut base_parts: Vec<&str> = b.path.split('/').collect();
+    if base_parts.last() != Some(&"") {
+        base_parts.pop();
+    }
+    let segments: Vec<&str> = if u.path.starts_with('/') {
+        u.path.split('/').collect()
+    } else {
+        let mut segments = base_parts;
+        segments.extend(u.path.split('/'));
+        let last = segments.len() - 1;
+        let mut kept: Vec<&str> = Vec::with_capacity(segments.len());
+        for (i, segment) in segments.iter().enumerate() {
+            if i == 0 || i == last || !segment.is_empty() {
+                kept.push(segment);
+            }
+        }
+        kept
+    };
+    let mut resolved: Vec<&str> = Vec::with_capacity(segments.len());
+    for segment in &segments {
+        match *segment {
+            ".." => {
+                resolved.pop();
+            }
+            "." => {}
+            other => resolved.push(other),
+        }
+    }
+    if matches!(segments.last(), Some(&".") | Some(&"..")) {
+        resolved.push("");
+    }
+    let path = resolved.join("/");
+    u.path = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    };
+    Ok(u.join())
 }
 
 /// The scheme `urlsplit` finds in `url`, lower-cased (empty when there is none).
@@ -423,10 +593,8 @@ mod tests {
 
     /// `[base, url, result]` triples computed by CPython (`scripts/urljoin_cases.py`);
     /// a result of `null` means `urljoin` raised.
-    #[test]
-    fn urljoin_matches_cpython() {
-        let cases: Vec<(String, String, Option<String>)> =
-            serde_json::from_str(include_str!("../tests/fixtures/urljoin.json")).unwrap();
+    fn check_urljoin(fixture: &str) {
+        let cases: Vec<(String, String, Option<String>)> = serde_json::from_str(fixture).unwrap();
         assert!(cases.len() > 1000);
         for (base, url, expected) in cases {
             let actual = urljoin(&base, &url).ok();
@@ -434,10 +602,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn urldefrag_matches_cpython() {
-        let cases: Vec<(String, Value)> =
-            serde_json::from_str(include_str!("../tests/fixtures/urldefrag.json")).unwrap();
+    fn check_urldefrag(fixture: &str) {
+        let cases: Vec<(String, Value)> = serde_json::from_str(fixture).unwrap();
         assert!(cases.len() > 100);
         for (url, expected) in cases {
             let actual = urldefrag(&url)
@@ -446,5 +612,21 @@ mod tests {
                 .unwrap_or(Value::Null);
             assert_eq!(actual, expected, "urldefrag({url:?})");
         }
+    }
+
+    #[test]
+    fn urljoin_matches_cpython() {
+        check_urljoin(include_str!("../tests/fixtures/urljoin.json"));
+        crate::context::with_python_minor(14, || {
+            check_urljoin(include_str!("../tests/fixtures/urljoin-3.14.json"));
+        });
+    }
+
+    #[test]
+    fn urldefrag_matches_cpython() {
+        check_urldefrag(include_str!("../tests/fixtures/urldefrag.json"));
+        crate::context::with_python_minor(14, || {
+            check_urldefrag(include_str!("../tests/fixtures/urldefrag-3.14.json"));
+        });
     }
 }

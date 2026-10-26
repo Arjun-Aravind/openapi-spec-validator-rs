@@ -385,10 +385,8 @@ impl<'d> Oas30<'d, '_, '_> {
             }
             "type" => {
                 let Value::String(name) = value else {
-                    return Err(Crash(format!(
-                        "unhashable type: '{}'",
-                        python_type_name(value)
-                    )));
+                    // The type checker's map hashes it.
+                    return Err(Crash(pyobj::unhashable(value, pyobj::Hashed::Plain)));
                 };
                 if instance.is_null() {
                     if schema.get("nullable") == Some(&Value::Bool(true)) {
@@ -767,7 +765,7 @@ impl<'d> Oas30<'d, '_, '_> {
             )));
             return Ok(());
         };
-        pyobj::check_hashable(prop_name).map_err(Crash)?;
+        pyobj::check_hashable(prop_name, pyobj::Hashed::DictKey).map_err(Crash)?;
         let prop_value = prop_name.as_str().and_then(|name| object.get(name));
         let Some(prop_value) = prop_value.filter(|v| truthy(v)) else {
             errors.push(Self::error(format!(
@@ -788,7 +786,7 @@ impl<'d> Oas30<'d, '_, '_> {
                 )));
             }
         };
-        pyobj::check_hashable(prop_value).map_err(Crash)?;
+        pyobj::check_hashable(prop_value, pyobj::Hashed::DictKey).map_err(Crash)?;
         let mapped = mapping
             .and_then(|mapping| prop_value.as_str().and_then(|key| mapping.get(key)))
             .filter(|v| truthy(v));
@@ -851,7 +849,7 @@ pub(crate) fn multiple_of(x: Num, instance: &Value, divisor: &Value) -> Result<b
         if n.is_f64() {
             let d = n.as_f64().unwrap_or_default();
             if d == 0.0 {
-                return Err(Crash("float division by zero".to_owned()));
+                return Err(Crash(pyobj::zero_division("float division by zero")));
             }
             let quotient = x.as_f64() / d;
             if quotient.is_finite() {
@@ -866,13 +864,13 @@ pub(crate) fn multiple_of(x: Num, instance: &Value, divisor: &Value) -> Result<b
     Ok(match (x, divisor) {
         (Num::Int(a), Num::Int(b)) => {
             if b == 0 {
-                return Err(Crash("integer modulo by zero".to_owned()));
+                return Err(Crash(pyobj::zero_division("integer modulo by zero")));
             }
             a % b != 0
         }
         (Num::Float(a), Num::Int(b)) => {
             if b == 0 {
-                return Err(Crash("float modulo by zero".to_owned()));
+                return Err(Crash(pyobj::zero_division("float modulo by zero")));
             }
             #[allow(clippy::cast_precision_loss)]
             let b = b as f64;
@@ -923,10 +921,7 @@ fn not_a_schema(schema: &Value) -> Crash {
         Value::String(s) => s.contains("$ref"),
         Value::Array(items) => items.iter().any(|item| item.as_str() == Some("$ref")),
         other => {
-            return Crash(format!(
-                "argument of type '{}' is not iterable",
-                python_type_name(other)
-            ));
+            return Crash(pyobj::not_a_container(other));
         }
     };
     let attribute = if has_ref { "items" } else { "get" };

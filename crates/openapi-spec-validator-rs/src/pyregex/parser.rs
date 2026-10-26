@@ -310,6 +310,8 @@ pub(crate) struct Parsed {
     /// Nesting exceeded what fancy-regex accepts (64 levels); the tree was
     /// discarded and the pattern cannot be matched.
     pub(crate) too_deep: bool,
+    /// `\B` matches the empty string, as it does from Python 3.14.
+    pub(crate) empty_non_boundary: bool,
 }
 
 impl Drop for Parsed {
@@ -334,6 +336,7 @@ pub(crate) fn compile(pattern: &str) -> PResult<Parsed> {
             lookbehindgroups: None,
             grouprefpos: Vec::new(),
         },
+        py314: crate::context::python_minor() >= 14,
         frames: 0,
         max_depth: 0,
     };
@@ -348,6 +351,7 @@ pub(crate) fn compile(pattern: &str) -> PResult<Parsed> {
         flags: 0,
         groupwidths: Vec::new(),
         too_deep: p.max_depth > MAX_TRANSLATABLE_DEPTH,
+        empty_non_boundary: p.py314,
     };
     parsed.flags = fix_flags(p.state.flags)?;
     if p.source.next.is_some() {
@@ -579,6 +583,8 @@ impl Frame {
 struct Parser {
     source: Tokenizer,
     state: State,
+    /// Python 3.14's syntax: `\z` is an end-of-string anchor.
+    py314: bool,
     /// Python frames of `_parse_sub`/`_parse` currently active.
     frames: usize,
     /// Deepest `_parse` nesting reached.
@@ -893,6 +899,7 @@ impl Parser {
             'b' => return Ok(Escape::At(At::Boundary)),
             'B' => return Ok(Escape::At(At::NonBoundary)),
             'Z' => return Ok(Escape::At(At::EndString)),
+            'z' if self.py314 => return Ok(Escape::At(At::EndString)),
             _ => {}
         }
         if let Some(cat) = category(c) {

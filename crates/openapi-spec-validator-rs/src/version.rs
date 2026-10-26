@@ -110,10 +110,7 @@ pub fn detect_version(spec: &Value) -> Result<SpecVersion, DetectError> {
                 continue;
             }
             other => {
-                return Err(DetectError::TypeError(format!(
-                    "argument of type '{}' is not iterable",
-                    python_type_name(other)
-                )));
+                return Err(DetectError::TypeError(crate::pyobj::not_a_container(other)));
             }
         };
         let Value::String(version_str) = version_value else {

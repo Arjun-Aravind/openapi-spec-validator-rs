@@ -63,7 +63,7 @@ use serde_json::Value;
 
 pub use crate::context::{
     Cancelled, ContextHandle, DEFAULT_PYTHON_MINOR, PythonStack, check as check_cancelled,
-    run_cancellable, with_python_minor, with_python_stack,
+    python_minor, run_cancellable, with_python_minor, with_python_stack,
 };
 use crate::context::{Context, python_stack};
 use crate::document::Documents;

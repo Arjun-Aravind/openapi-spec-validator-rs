@@ -776,7 +776,7 @@ fn undefined_required(
     let items = pyobj::iterate(required).map_err(Stop::Crash)?;
     let mut extra: Vec<Value> = Vec::new();
     for item in items {
-        pyobj::check_hashable(&item).map_err(Stop::Crash)?;
+        pyobj::check_hashable(&item, pyobj::Hashed::SetElement).map_err(Stop::Crash)?;
         let defined = item
             .as_str()
             .is_some_and(|name| properties.contains(&name) || nested.iter().any(|n| n == name));

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import sys
 from collections import deque
 from typing import Any
 
@@ -123,7 +124,9 @@ def test_format_error_cause(make_spec) -> None:
 
     assert error.message == "'2020-13-01' is not a 'date'"
     assert isinstance(error.cause, Exception)
-    assert str(error.cause) == "month must be in 1..12"
+    # Python 3.14 adds the value to datetime's messages.
+    month = "month must be in 1..12" + (", not 13" if sys.version_info >= (3, 14) else "")
+    assert str(error.cause) == month
     assert error.__cause__ is error.cause
 
 

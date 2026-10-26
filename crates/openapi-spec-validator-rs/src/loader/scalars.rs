@@ -276,31 +276,14 @@ pub(super) fn timestamp_value(s: &str) -> Result<Timestamp, String> {
         (num(time.minute), "minute", 59),
         (num(time.second), "second", 59),
     ] {
-        if value > max {
-            return Err(format!("{name} must be in 0..{max}"));
-        }
+        crate::formats::check_time_field(name, u32::try_from(value).unwrap_or(u32::MAX), max)?;
     }
     Ok(Timestamp::DateTime)
 }
 
 fn check_date(year: i64, month: i64, day: i64) -> Result<(), String> {
-    if !(1..=9999).contains(&year) {
-        return Err(format!("year {year} is out of range"));
-    }
-    if !(1..=12).contains(&month) {
-        return Err("month must be in 1..12".to_owned());
-    }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days = match month {
-        2 if leap => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    };
-    if !(1..=days).contains(&day) {
-        return Err("day is out of range for month".to_owned());
-    }
-    Ok(())
+    let field = |value: i64| u32::try_from(value).unwrap_or(u32::MAX);
+    crate::formats::check_date_args(field(year), field(month), field(day))
 }
 
 /// `repr(datetime.timedelta(seconds=s))`.

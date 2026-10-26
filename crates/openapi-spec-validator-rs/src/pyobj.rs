@@ -155,14 +155,55 @@ pub(crate) fn num_cmp(a: &Num, b: &Num) -> Option<Ordering> {
     }
 }
 
-/// `hash(value)` succeeds: lists and dicts are unhashable.
-pub(crate) fn check_hashable(value: &Value) -> Result<(), String> {
+/// What a value is hashed for: Python 3.14 names it when the value is unhashable.
+#[derive(Clone, Copy)]
+pub(crate) enum Hashed {
+    /// `hash(value)`, or a lookup in a mapping that is not a `dict`.
+    Plain,
+    DictKey,
+    SetElement,
+}
+
+/// The `TypeError` for hashing the unhashable `value`.
+pub(crate) fn unhashable(value: &Value, hashed: Hashed) -> String {
+    let name = python_type_name(value);
+    let used = match hashed {
+        _ if crate::context::python_minor() < 14 => None,
+        Hashed::Plain => None,
+        Hashed::DictKey => Some("a dict key"),
+        Hashed::SetElement => Some("a set element"),
+    };
+    match used {
+        Some(used) => format!("cannot use '{name}' as {used} (unhashable type: '{name}')"),
+        None => format!("unhashable type: '{name}'"),
+    }
+}
+
+/// The `TypeError` of `item in value` for a `value` that is no container.
+pub(crate) fn not_a_container(value: &Value) -> String {
+    let name = python_type_name(value);
+    if crate::context::python_minor() < 14 {
+        format!("argument of type '{name}' is not iterable")
+    } else {
+        format!("argument of type '{name}' is not a container or iterable")
+    }
+}
+
+/// The `ZeroDivisionError` message, `before_3_14` until Python 3.14 unified them.
+pub(crate) fn zero_division(before_3_14: &str) -> String {
+    if crate::context::python_minor() < 14 {
+        before_3_14.to_owned()
+    } else {
+        "division by zero".to_owned()
+    }
+}
+
+/// `value` can be hashed (`hashed` as what): lists and dicts are unhashable.
+pub(crate) fn check_hashable(value: &Value, hashed: Hashed) -> Result<(), String> {
     match value {
         // Dates and bytes hash; a `set` would not, which is not modelled.
         _ if foreign(value).is_some() => Ok(()),
-        Value::Array(_) | Value::Object(_) => {
-            Err(format!("unhashable type: '{}'", python_type_name(value)))
-        }
+        Value::Array(_) | Value::Object(_) => Err(unhashable(value, hashed)),
         _ => Ok(()),
     }
 }

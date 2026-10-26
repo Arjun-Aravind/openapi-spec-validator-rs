@@ -364,7 +364,8 @@ def test_validate_path(write, make_spec) -> None:
 
     # An empty document loads as None, which upstream cannot look a version up in.
     empty = write("empty.yaml", "")
-    with pytest.raises(TypeError, match="argument of type 'NoneType' is not iterable"):
+    # Python 3.14 words it "is not a container or iterable".
+    with pytest.raises(TypeError, match="argument of type 'NoneType' is not (a container or )?iterable"):
         osv.validate_path(empty)
 
     float_version = write("float.yaml", "swagger: 2.0\n")

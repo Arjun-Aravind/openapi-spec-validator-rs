@@ -1,0 +1,9 @@
+openapi: 3.0.3
+info:
+  title: A reference to a file with a query string
+  version: "1.0"
+paths: {}
+components:
+  schemas:
+    Pet:
+      $ref: "query-ref-target.yaml?v=1"

@@ -19,6 +19,16 @@ fn fixture_dir() -> PathBuf {
     )
 }
 
+/// The Python minor version the fixtures come from (`$PYREGEX_PYTHON_MINOR`, by default
+/// 13): 3.14 accepts `\z` and lets `\B` match the empty string.
+fn with_fixture_python<T>(f: impl FnOnce() -> T) -> T {
+    let minor = std::env::var("PYREGEX_PYTHON_MINOR")
+        .ok()
+        .and_then(|minor| minor.parse().ok())
+        .unwrap_or(crate::context::DEFAULT_PYTHON_MINOR);
+    crate::context::with_python_minor(minor, f)
+}
+
 fn fixture(name: &str) -> Vec<Value> {
     let path = fixture_dir().join(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
@@ -52,6 +62,10 @@ fn short(s: &str) -> String {
 
 #[test]
 fn validity_matches_cpython() {
+    with_fixture_python(validity_matches_cpython_inner);
+}
+
+fn validity_matches_cpython_inner() {
     let cases = fixture("validity.json");
     let mut validity_bad = Vec::new();
     let mut kind_bad = Vec::new();
@@ -155,6 +169,10 @@ fn validity_matches_cpython() {
 
 #[test]
 fn search_matches_cpython() {
+    with_fixture_python(search_matches_cpython_inner);
+}
+
+fn search_matches_cpython_inner() {
     let cases = fixture("matching.json");
     let mut wrong = Vec::new();
     // Documented gap: case-insensitive backreferences compare by simple case

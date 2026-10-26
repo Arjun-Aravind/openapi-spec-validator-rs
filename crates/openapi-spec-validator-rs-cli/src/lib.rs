@@ -52,6 +52,12 @@ pub struct Args {
     #[arg(long, default_value = "detect", value_name = "{detect,2.0,3.0,3.1,3.2}",
           value_parser = ["detect", "2.0", "3.0", "3.1", "3.2", "3.0.0", "3.1.0", "3.2.0"])]
     pub schema: String,
+
+    /// Python version whose standard library to follow where it changed: 3.14 drops
+    /// the query of file: URLs, accepts \z in patterns and words some errors
+    /// differently (default: the running Python for the Python package, else 3.13).
+    #[arg(long, value_name = "{3.13,3.14}", value_parser = ["3.13", "3.14"])]
+    pub python_version: Option<String>,
 }
 
 /// How much detail to print about subschema (e.g. `oneOf` branch) errors.
@@ -107,7 +113,14 @@ where
         }
     };
     // An I/O error here is a broken pipe or similar: nothing sensible left to report.
-    execute(&args, &Mutex::new(stdin), retriever, out, err).unwrap_or(1)
+    let python_minor = match args.python_version.as_deref() {
+        Some("3.14") => 14,
+        Some(_) => 13,
+        None => openapi_spec_validator_rs::python_minor(),
+    };
+    openapi_spec_validator_rs::with_python_minor(python_minor, || {
+        execute(&args, &Mutex::new(stdin), retriever, out, err).unwrap_or(1)
+    })
 }
 
 fn execute(

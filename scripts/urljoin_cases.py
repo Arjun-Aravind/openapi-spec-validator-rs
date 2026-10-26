@@ -2,11 +2,14 @@
 
 Writes crates/openapi-spec-validator-rs/tests/fixtures/{urljoin,urldefrag}.json with the
 results of CPython's own `urllib.parse` functions, which upstream uses to resolve `$ref`s.
-Usage: python scripts/urljoin_cases.py
+Python 3.14 changed both; run with 3.14 or later, it writes urljoin-3.14.json and
+urldefrag-3.14.json instead.
+Usage: python3.13 scripts/urljoin_cases.py; python3.14 scripts/urljoin_cases.py
 """
 
 import json
 import pathlib
+import sys
 from urllib.parse import urldefrag, urljoin
 
 BASES = [
@@ -39,7 +42,8 @@ def result(base: str, ref: str):
 def main() -> None:
     out = pathlib.Path(__file__).resolve().parent.parent / "crates/openapi-spec-validator-rs/tests/fixtures"
     joins = [[b, r, result(b, r)] for b in BASES for r in REFS]
-    (out / "urljoin.json").write_text(json.dumps(joins, ensure_ascii=False, indent=0) + "\n")
+    suffix = "-3.14" if sys.version_info >= (3, 14) else ""
+    (out / f"urljoin{suffix}.json").write_text(json.dumps(joins, ensure_ascii=False, indent=0) + "\n")
     urls = sorted({r for r in REFS} | {b for b in BASES} | {j[2] for j in joins if j[2]})
     defrags = []
     for url in urls:
@@ -47,7 +51,7 @@ def main() -> None:
             defrags.append([url, list(urldefrag(url))])
         except ValueError:
             defrags.append([url, None])
-    (out / "urldefrag.json").write_text(json.dumps(defrags, ensure_ascii=False, indent=0) + "\n")
+    (out / f"urldefrag{suffix}.json").write_text(json.dumps(defrags, ensure_ascii=False, indent=0) + "\n")
     print(f"{len(joins)} urljoin cases, {len(defrags)} urldefrag cases")
 
 
