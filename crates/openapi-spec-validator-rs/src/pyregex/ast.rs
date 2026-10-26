@@ -7,6 +7,8 @@
 
 /// `SRE_FLAG_*` values from `re/_constants.py`.
 pub(crate) mod flags {
+    /// `(?t)`, accepted until Python 3.13 removed it.
+    pub const TEMPLATE: u32 = 1;
     pub const IGNORECASE: u32 = 2;
     pub const LOCALE: u32 = 4;
     pub const MULTILINE: u32 = 8;
@@ -130,14 +132,28 @@ pub(crate) enum Node {
     },
 }
 
-fn clamp(x: u128) -> u128 {
-    x.min(MAXWIDTH)
+/// The bounds of `SubPattern.getwidth()`: `(MAXWIDTH, MAXWIDTH)` from Python 3.11, and
+/// `(MAXREPEAT - 1, MAXREPEAT)` before, when an unbounded repeat also added only
+/// `MAXREPEAT` times its item's width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WidthRules {
+    Current,
+    Python310,
 }
 
-/// `SubPattern.getwidth()`. The parser's prefix/charset rewrites in `_parse_sub`
-/// preserve widths, and clamping to `MAXWIDTH` commutes with the arithmetic, so
-/// computing on this unrewritten tree yields CPython's values.
-pub(crate) fn width(seq: &[Node], groupwidths: &[Option<Width>]) -> Width {
+impl WidthRules {
+    fn clamp(self, (lo, hi): Width) -> Width {
+        match self {
+            WidthRules::Current => (lo.min(MAXWIDTH), hi.min(MAXWIDTH)),
+            WidthRules::Python310 => (
+                lo.min(u128::from(MAXREPEAT) - 1),
+                hi.min(u128::from(MAXREPEAT)),
+            ),
+        }
+    }
+}
+
+pub(crate) fn width(seq: &[Node], groupwidths: &[Option<Width>], rules: WidthRules) -> Width {
     seq.iter().fold((0, 0), |(lo, hi), node| {
         let (i, j) = match node {
             Node::Literal(_) | Node::Any | Node::Class { .. } => (1, 1),
@@ -147,7 +163,7 @@ pub(crate) fn width(seq: &[Node], groupwidths: &[Option<Width>]) -> Width {
             } => {
                 let (i, j) = *body_w;
                 let rlo = i.saturating_mul(u128::from(*min));
-                let rhi = if *max == MAXREPEAT && j != 0 {
+                let rhi = if *max == MAXREPEAT && j != 0 && rules == WidthRules::Current {
                     MAXWIDTH
                 } else {
                     j.saturating_mul(u128::from(*max))
@@ -162,20 +178,21 @@ pub(crate) fn width(seq: &[Node], groupwidths: &[Option<Width>]) -> Width {
                 .flatten()
                 .unwrap_or((0, 0)),
         };
-        (clamp(lo.saturating_add(i)), clamp(hi.saturating_add(j)))
+        rules.clamp((lo.saturating_add(i), hi.saturating_add(j)))
     })
 }
 
-/// Width of a `BRANCH` with the given alternatives.
-pub(crate) fn branch_width(alts: &[Vec<Node>], groupwidths: &[Option<Width>]) -> Width {
+pub(crate) fn branch_width(
+    alts: &[Vec<Node>],
+    groupwidths: &[Option<Width>],
+    rules: WidthRules,
+) -> Width {
     alts.iter().fold((MAXWIDTH, 0), |(i, j), alt| {
-        let (l, h) = width(alt, groupwidths);
+        let (l, h) = width(alt, groupwidths, rules);
         (i.min(l), j.max(h))
     })
 }
 
-/// Drops a tree without recursion (the derived drop glue recurses once per
-/// nesting level, which deep patterns could turn into a stack overflow).
 pub(crate) fn dismantle(mut work: Vec<Node>) {
     while let Some(node) = work.pop() {
         match node {

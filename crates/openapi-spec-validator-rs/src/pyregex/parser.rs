@@ -1,18 +1,21 @@
 //! Port of CPython 3.13 `re/_parser.py` (plus the compile-time checks of
 //! `re/_compiler.py`). Control flow, token look-ahead and error offsets follow
 //! the Python source statement by statement, because the *first* error raised
-//! (and its position) depends on that order.
+//! (and its position) depends on that order. Where the syntax differs in
+//! Python 3.10 to 3.12 or 3.14, the running version's rules apply
+//! (`context::python_minor`).
 //!
 //! The mutual recursion of `_parse_sub` and `_parse` is run on an explicit
 //! stack ([`Frame`]) so that deeply nested patterns cannot overflow the Rust
 //! stack; Python's own recursion limit is modelled by [`MAX_PY_FRAMES`].
 
 use super::ast::{
-    At, Category, ClassItem, MAXCODE, MAXGROUPS, MAXREPEAT, Node, RepeatKind, Width, branch_width,
-    dismantle, flags, width,
+    At, Category, ClassItem, MAXCODE, MAXGROUPS, MAXREPEAT, Node, RepeatKind, Width, WidthRules,
+    branch_width, dismantle, flags, width,
 };
-use super::unicode::{is_identifier, lookup_name, py_isalpha, py_repr};
+use super::unicode::{is_identifier, lookup_name, py_isalpha, py_repr, unicode_version};
 use super::{ErrorKind, PyRegexError};
+use crate::formats::decimal_value;
 
 type PResult<T> = Result<T, PyRegexError>;
 
@@ -20,8 +23,6 @@ type PResult<T> = Result<T, PyRegexError>;
 const SPECIAL_CHARS: &str = ".[{()*+?^$|";
 /// `WHITESPACE`
 const WHITESPACE: &str = " \t\n\r\x0b\x0c";
-/// CPython's default `sys.get_int_max_str_digits()`.
-const INT_MAX_STR_DIGITS: usize = 4300;
 /// Python frames of recursive descent (`_parse_sub` + `_parse` per group, one
 /// `_parse` per conditional branch) available before `RecursionError`.
 /// Calibrated on openapi-spec-validator 0.9.0, whose `re.compile` call sits at
@@ -95,19 +96,56 @@ fn other_error(kind: ErrorKind, msg: impl Into<String>) -> PyRegexError {
 /// `int(digits)` for an ASCII digit string, saturating at `u64::MAX`; raises
 /// CPython's `ValueError` for strings beyond the int/str conversion limit.
 fn py_int(digits: &str) -> PResult<u64> {
-    if digits.len() > INT_MAX_STR_DIGITS {
+    if digits.len() > crate::pyobj::MAX_STR_DIGITS {
         return Err(other_error(
             ErrorKind::Value,
-            format!(
-                "Exceeds the limit ({INT_MAX_STR_DIGITS} digits) for integer string conversion: \
-                 value has {} digits; use sys.set_int_max_str_digits() to increase the limit",
-                digits.len()
-            ),
+            crate::pyobj::int_from_str_limit(digits.len()),
         ));
     }
     Ok(digits.bytes().fold(0u64, |acc, b| {
         acc.saturating_mul(10).saturating_add(u64::from(b - b'0'))
     }))
+}
+
+/// `str(int(text))` for any `str`, as Python 3.11 and earlier read a numeric group
+/// condition: surrounding whitespace, a sign, underscores between digits and non-ASCII
+/// decimal digits are accepted. `None` where `int()` raises `ValueError`, including
+/// beyond the int/str conversion limit.
+fn py_int_text(text: &str) -> Option<String> {
+    let ascii: String = text
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() {
+                ' '
+            } else if let Some(d) = decimal_value(c) {
+                char::from_digit(d, 10).unwrap_or('?')
+            } else if c.is_ascii() {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    let trimmed = ascii.trim_matches(' ');
+    let (negative, body) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let well_formed = body.starts_with(|c: char| c.is_ascii_digit())
+        && body.ends_with(|c: char| c.is_ascii_digit())
+        && !body.contains("__")
+        && body.bytes().all(|b| b.is_ascii_digit() || b == b'_');
+    let digits: String = body.chars().filter(|&c| c != '_').collect();
+    if !well_formed || digits.len() > crate::pyobj::MAX_STR_DIGITS {
+        return None;
+    }
+    let value = int_text(&digits);
+    Some(if negative && value != "0" {
+        format!("-{value}")
+    } else {
+        value.to_owned()
+    })
 }
 
 /// `str(int(digits))` (leading zeros stripped).
@@ -312,6 +350,8 @@ pub(crate) struct Parsed {
     pub(crate) too_deep: bool,
     /// `\B` matches the empty string, as it does from Python 3.14.
     pub(crate) empty_non_boundary: bool,
+    /// The Unicode version of the Python whose rules applied (`unicode::unicode_version`).
+    pub(crate) unicode_version: usize,
 }
 
 impl Drop for Parsed {
@@ -326,24 +366,14 @@ const MAX_TRANSLATABLE_DEPTH: usize = 64;
 /// `re.compile(pattern)`: `_parser.parse` followed by the checks `_compiler`
 /// performs while emitting code.
 pub(crate) fn compile(pattern: &str) -> PResult<Parsed> {
-    let source = Tokenizer::new(pattern)?;
-    let mut p = Parser {
-        source,
-        state: State {
-            flags: 0,
-            groupdict: Vec::new(),
-            groupwidths: vec![None],
-            lookbehindgroups: None,
-            grouprefpos: Vec::new(),
-        },
-        py314: crate::context::python_minor() >= 14,
-        frames: 0,
-        max_depth: 0,
-    };
-    let mut stack = Vec::new();
-    let result = p.run(&mut stack);
-    for frame in stack {
-        frame.dismantle();
+    let minor = crate::context::python_minor();
+    let mut p = Parser::new(pattern, minor, false)?;
+    let mut result = p.parse_all();
+    if p.restart_verbose {
+        // Python 3.10: `(?x)` after the start makes the whole pattern verbose, so
+        // `parse` starts again from the beginning (its `Verbose` exception).
+        p = Parser::new(pattern, minor, true)?;
+        result = p.parse_all();
     }
     let nodes = result?;
     let mut parsed = Parsed {
@@ -351,7 +381,8 @@ pub(crate) fn compile(pattern: &str) -> PResult<Parsed> {
         flags: 0,
         groupwidths: Vec::new(),
         too_deep: p.max_depth > MAX_TRANSLATABLE_DEPTH,
-        empty_non_boundary: p.py314,
+        empty_non_boundary: minor >= 14,
+        unicode_version: unicode_version(minor),
     };
     parsed.flags = fix_flags(p.state.flags)?;
     if p.source.next.is_some() {
@@ -362,7 +393,7 @@ pub(crate) fn compile(pattern: &str) -> PResult<Parsed> {
             return Err(re_error(format!("invalid group reference {g}"), pos));
         }
     }
-    check_lookbehinds(&parsed.nodes)?;
+    check_compiled(&parsed.nodes, parsed.flags, minor)?;
     if parsed.too_deep {
         dismantle(std::mem::take(&mut parsed.nodes));
     }
@@ -390,8 +421,11 @@ fn fix_flags(f: u32) -> PResult<u32> {
     }
 }
 
-/// The look-behind checks in `_compiler._compile`, in emission (pre-)order.
-fn check_lookbehinds(nodes: &[Node]) -> PResult<()> {
+/// The checks in `_compiler._compile`, in emission (pre-)order: look-behind widths, and
+/// repeats under `(?t)` (Python 3.12 and earlier). Python 3.10's `_sre` then rejects a
+/// look-behind of 2**31 characters or more, which 3.11 no longer emits that way.
+fn check_compiled(nodes: &[Node], f: u32, minor: u32) -> PResult<()> {
+    let mut sre_code_too_wide = false;
     let mut work: Vec<std::slice::Iter<'_, Node>> = vec![nodes.iter()];
     while let Some(iter) = work.last_mut() {
         let Some(node) = iter.next() else {
@@ -407,7 +441,7 @@ fn check_lookbehinds(nodes: &[Node]) -> PResult<()> {
             } => {
                 if *behind {
                     let (lo, hi) = *body_w;
-                    if lo > MAXCODE {
+                    if lo > MAXCODE && minor >= 11 {
                         return Err(other_error(ErrorKind::Re, "looks too much behind"));
                     }
                     if lo != hi {
@@ -416,10 +450,25 @@ fn check_lookbehinds(nodes: &[Node]) -> PResult<()> {
                             "look-behind requires fixed-width pattern",
                         ));
                     }
+                    sre_code_too_wide |= minor <= 10 && lo >= 1 << 31;
                 }
                 work.push(body.iter());
             }
-            Node::Repeat { body, .. } | Node::Group { body, .. } | Node::Atomic { body, .. } => {
+            Node::Repeat { kind, body, .. } => {
+                if f & flags::TEMPLATE != 0 {
+                    let op = match kind {
+                        RepeatKind::Greedy => "MAX_REPEAT",
+                        RepeatKind::Lazy => "MIN_REPEAT",
+                        RepeatKind::Possessive => "POSSESSIVE_REPEAT",
+                    };
+                    return Err(other_error(
+                        ErrorKind::Re,
+                        format!("internal: unsupported template operator {op}"),
+                    ));
+                }
+                work.push(body.iter());
+            }
+            Node::Group { body, .. } | Node::Atomic { body, .. } => {
                 work.push(body.iter());
             }
             Node::Branch { alts, .. } => {
@@ -435,6 +484,9 @@ fn check_lookbehinds(nodes: &[Node]) -> PResult<()> {
             Node::Literal(_) | Node::Any | Node::Class { .. } | Node::At(_) | Node::GroupRef(_) => {
             }
         }
+    }
+    if sre_code_too_wide {
+        return Err(other_error(ErrorKind::Runtime, "invalid SRE code"));
     }
     Ok(())
 }
@@ -474,9 +526,10 @@ fn simple_escape(c: char) -> Option<u32> {
     })
 }
 
-/// `FLAGS`
-fn flag_value(t: Tok) -> Option<u32> {
+/// `FLAGS`; `t` until Python 3.13.
+fn flag_value(t: Tok, minor: u32) -> Option<u32> {
     Some(match t {
+        Tok::Ch('t') if minor <= 12 => flags::TEMPLATE,
         Tok::Ch('i') => flags::IGNORECASE,
         Tok::Ch('L') => flags::LOCALE,
         Tok::Ch('m') => flags::MULTILINE,
@@ -570,6 +623,24 @@ impl Frame {
         }
     }
 
+    /// The `RecursionError` raised entering this call one level too deep, as upstream's check
+    /// of a `pattern` keyword words it: on Python 3.10 a comparison exceeds the limit first,
+    /// unless the level is a plain group or a look-around.
+    fn recursion_message(&self, minor: u32) -> &'static str {
+        let plain_group = matches!(
+            &self.ret,
+            Ret::Alt(Alt {
+                ret: AltRet::Look { .. } | AltRet::Group { add: 0, del: 0, .. },
+                ..
+            })
+        );
+        if minor <= 10 && !plain_group {
+            "maximum recursion depth exceeded in comparison"
+        } else {
+            "maximum recursion depth exceeded"
+        }
+    }
+
     fn dismantle(self) {
         dismantle(self.sub);
         match self.ret {
@@ -583,8 +654,12 @@ impl Frame {
 struct Parser {
     source: Tokenizer,
     state: State,
-    /// Python 3.14's syntax: `\z` is an end-of-string anchor.
-    py314: bool,
+    /// The Python minor version whose syntax applies.
+    minor: u32,
+    /// Whether the whole pattern is verbose from the start (Python 3.10's second pass).
+    verbose: bool,
+    /// Python 3.10: global `(?x)` turned up after the start; parse again verbosely.
+    restart_verbose: bool,
     /// Python frames of `_parse_sub`/`_parse` currently active.
     frames: usize,
     /// Deepest `_parse` nesting reached.
@@ -592,25 +667,79 @@ struct Parser {
 }
 
 impl Parser {
+    fn new(pattern: &str, minor: u32, verbose: bool) -> PResult<Self> {
+        Ok(Parser {
+            source: Tokenizer::new(pattern)?,
+            state: State {
+                flags: if verbose { flags::VERBOSE } else { 0 },
+                groupdict: Vec::new(),
+                groupwidths: vec![None],
+                lookbehindgroups: None,
+                grouprefpos: Vec::new(),
+            },
+            minor,
+            verbose,
+            restart_verbose: false,
+            frames: 0,
+            max_depth: 0,
+        })
+    }
+
+    /// `_parse_sub(source, state, verbose, 0)`, releasing what an error leaves behind.
+    fn parse_all(&mut self) -> PResult<Vec<Node>> {
+        let mut stack = Vec::new();
+        let result = self.run(&mut stack);
+        for frame in stack {
+            frame.dismantle();
+        }
+        result
+    }
+
+    fn width_rules(&self) -> WidthRules {
+        if self.minor <= 10 {
+            WidthRules::Python310
+        } else {
+            WidthRules::Current
+        }
+    }
+
+    fn flag(&self, t: Tok) -> Option<u32> {
+        flag_value(t, self.minor)
+    }
+
+    /// `MAXGROUPS`: `_sre` allowed twice as many groups in Python 3.10.
+    fn maxgroups(&self) -> u64 {
+        if self.minor <= 10 {
+            (MAXGROUPS << 1) | 1
+        } else {
+            MAXGROUPS
+        }
+    }
+
     /// Enters a `_parse` (and possibly `_parse_sub`) call.
     fn call(&mut self, stack: &mut Vec<Frame>, frame: Frame) -> PResult<()> {
         self.frames += frame.py_frames();
-        stack.push(frame);
-        if self.frames > MAX_PY_FRAMES {
-            return Err(other_error(
-                ErrorKind::Recursion,
-                "maximum recursion depth exceeded",
-            ));
+        // Python 3.10 also counts some C calls on upstream's way to `re.compile`.
+        let limit = if self.minor <= 10 {
+            MAX_PY_FRAMES - 3
+        } else {
+            MAX_PY_FRAMES
+        };
+        if self.frames > limit {
+            let message = frame.recursion_message(self.minor);
+            stack.push(frame);
+            return Err(other_error(ErrorKind::Recursion, message));
         }
+        stack.push(frame);
         self.max_depth = self.max_depth.max(stack.len());
         Ok(())
     }
 
-    /// `_parse_sub(source, state, 0, 0)` driven iteratively.
+    /// `_parse_sub(source, state, verbose, 0)` driven iteratively.
     fn run(&mut self, stack: &mut Vec<Frame>) -> PResult<Vec<Node>> {
         let root = Alt {
             items: Vec::new(),
-            verbose: false,
+            verbose: self.verbose,
             nested: 0,
             ret: AltRet::Root,
         };
@@ -640,7 +769,8 @@ impl Parser {
                     let p = if alt.items.len() == 1 {
                         alt.items.pop().unwrap_or_default()
                     } else {
-                        let w = branch_width(&alt.items, &self.state.groupwidths);
+                        let w =
+                            branch_width(&alt.items, &self.state.groupwidths, self.width_rules());
                         vec![Node::Branch { alts: alt.items, w }]
                     };
                     match alt.ret {
@@ -655,7 +785,7 @@ impl Parser {
                                 self.state.lookbehindgroups = None;
                             }
                             self.expect_close(start)?;
-                            let body_w = width(&p, &self.state.groupwidths);
+                            let body_w = width(&p, &self.state.groupwidths, self.width_rules());
                             Node::Look {
                                 behind,
                                 negate,
@@ -671,7 +801,7 @@ impl Parser {
                             del,
                         } => {
                             self.expect_close(start)?;
-                            let body_w = width(&p, &self.state.groupwidths);
+                            let body_w = width(&p, &self.state.groupwidths, self.width_rules());
                             if let Some(g) = group {
                                 // closegroup
                                 if let Some(slot) = self.state.groupwidths.get_mut(g as usize) {
@@ -737,10 +867,11 @@ impl Parser {
     ) -> PResult<Node> {
         self.expect_close(cond.start)?;
         let gw = &self.state.groupwidths;
-        let (i, j) = width(&yes, gw);
+        let rules = self.width_rules();
+        let (i, j) = width(&yes, gw, rules);
         let w = match &no {
             Some(no) => {
-                let (l, h) = width(no, gw);
+                let (l, h) = width(no, gw, rules);
                 (i.min(l), j.max(h))
             }
             None => (0, j),
@@ -853,6 +984,13 @@ impl Parser {
             return Err(src.error(format!("incomplete escape {escape}"), escape.len()));
         }
         let value = hex_value(&hex);
+        if value > 0x7FFF_FFFF && self.minor <= 12 {
+            // `chr(c)` took a C int until Python 3.13.
+            return Err(other_error(
+                ErrorKind::Overflow,
+                "Python int too large to convert to C int",
+            ));
+        }
         if value > 0x10FFFF {
             // chr(c) raises ValueError -> "bad escape"
             return Err(src.error(format!("bad escape {escape}"), escape.len()));
@@ -899,7 +1037,7 @@ impl Parser {
             'b' => return Ok(Escape::At(At::Boundary)),
             'B' => return Ok(Escape::At(At::NonBoundary)),
             'Z' => return Ok(Escape::At(At::EndString)),
-            'z' if self.py314 => return Ok(Escape::At(At::EndString)),
+            'z' if self.minor >= 14 => return Ok(Escape::At(At::EndString)),
             _ => {}
         }
         if let Some(cat) = category(c) {
@@ -1014,6 +1152,8 @@ impl Parser {
     /// The repeat branch of `_parse`: replaces the last item of `sub` (or
     /// pushes a literal `{`).
     fn parse_repeat(&mut self, this: char, sub: &mut Vec<Node>) -> PResult<()> {
+        let rules = self.width_rules();
+        let possessive = self.minor >= 11;
         let src = &mut self.source;
         let here = src.tell();
         let (min, max) = match this {
@@ -1083,13 +1223,13 @@ impl Parser {
             }) => (body, body_w),
             Some(node) => {
                 let item = vec![node];
-                let w = width(&item, &self.state.groupwidths);
+                let w = width(&item, &self.state.groupwidths, rules);
                 (item, w)
             }
         };
         let kind = if src.match_('?')? {
             RepeatKind::Lazy
-        } else if src.match_('+')? {
+        } else if possessive && src.match_('+')? {
             RepeatKind::Possessive
         } else {
             RepeatKind::Greedy
@@ -1226,14 +1366,23 @@ impl Parser {
                         ret: Ret::CondYes(cond),
                     }));
                 }
-                Tok::Ch('>') => {
+                Tok::Ch('>') if self.minor >= 11 => {
                     // non-capturing, atomic group
                     capture = false;
                     atomic = true;
                 }
-                ch if flag_value(ch).is_some() || ch.is('-') => {
+                ch if self.flag(ch).is_some() || ch.is('-') => {
                     // flags
                     match self.parse_flags(ch)? {
+                        None if self.minor <= 10 => {
+                            // global flags, anywhere (deprecated); they apply to the
+                            // whole pattern
+                            if self.state.flags & flags::VERBOSE != 0 && !frame.verbose {
+                                self.restart_verbose = true;
+                                return Err(other_error(ErrorKind::Re, "verbose"));
+                            }
+                            return Ok(None);
+                        }
                         None => {
                             // global flags
                             if !frame.first || !frame.sub.is_empty() {
@@ -1287,7 +1436,7 @@ impl Parser {
     fn opengroup(&mut self, name: Option<&(String, usize)>) -> PResult<u32> {
         let gid = self.state.groups();
         self.state.groupwidths.push(None);
-        if self.state.groups() as u64 > MAXGROUPS {
+        if self.state.groups() as u64 > self.maxgroups() {
             return Err(match name {
                 Some((_, len)) => self.source.error("too many groups", len + 1),
                 // `len(None)` in the error handler
@@ -1312,21 +1461,29 @@ impl Parser {
     /// The condition of `(?(...)`: returns the referenced group.
     fn parse_condition(&mut self) -> PResult<u64> {
         let (condname, len) = self.source.getuntil(')', "group name")?;
-        let condgroup = if !condname.bytes().all(|b| b.is_ascii_digit()) {
-            self.source.checkgroupname(&condname, len, 1)?;
-            let Some(g) = self.state.group_index(&condname) else {
-                return Err(self.source.error(
-                    format!("unknown group name {}", py_repr(&condname)),
-                    len + 1,
-                ));
-            };
-            u64::from(g)
+        // Until Python 3.12, a name that is not an identifier is read with `int()`.
+        let number = if self.minor <= 11 && !is_identifier(&condname) {
+            match py_int_text(&condname) {
+                Some(digits) if !digits.starts_with('-') => Some(digits),
+                _ => {
+                    return Err(self.source.error(
+                        format!("bad character in group name {}", py_repr(&condname)),
+                        len + 1,
+                    ));
+                }
+            }
         } else {
+            condname
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+                .then(|| condname.clone())
+        };
+        let condgroup = if let Some(condname) = number {
             let g = py_int(&condname)?;
             if g == 0 {
                 return Err(self.source.error("bad group number", len + 1));
             }
-            if g >= MAXGROUPS {
+            if g >= self.maxgroups() {
                 return Err(self.source.error(
                     format!("invalid group reference {}", int_text(&condname)),
                     len + 1,
@@ -1337,6 +1494,15 @@ impl Parser {
                 self.state.grouprefpos.push((g, pos));
             }
             g
+        } else {
+            self.source.checkgroupname(&condname, len, 1)?;
+            let Some(g) = self.state.group_index(&condname) else {
+                return Err(self.source.error(
+                    format!("unknown group name {}", py_repr(&condname)),
+                    len + 1,
+                ));
+            };
+            u64::from(g)
         };
         self.state.checklookbehindgroup(condgroup, &self.source)?;
         Ok(condgroup)
@@ -1348,7 +1514,7 @@ impl Parser {
         let mut del_flags = 0;
         if !ch.is('-') {
             loop {
-                let flag = flag_value(ch).unwrap_or(0);
+                let flag = self.flag(ch).unwrap_or(0);
                 if ch.is('L') {
                     return Err(self.source.error(
                         "bad inline flags: cannot use 'L' flag with a str pattern",
@@ -1369,7 +1535,7 @@ impl Parser {
                 if ch.ch_in(")-:") {
                     break;
                 }
-                if flag_value(ch).is_none() {
+                if self.flag(ch).is_none() {
                     let msg = if tok_isalpha(ch) {
                         "unknown flag"
                     } else {
@@ -1383,12 +1549,17 @@ impl Parser {
             self.state.flags |= add_flags;
             return Ok(None);
         }
+        if add_flags & flags::TEMPLATE != 0 {
+            return Err(self
+                .source
+                .error("bad inline flags: cannot turn on global flag", 1));
+        }
         if ch.is('-') {
             let Some(next) = self.source.get()? else {
                 return Err(self.source.error("missing flag", 0));
             };
             ch = next;
-            if flag_value(ch).is_none() {
+            if self.flag(ch).is_none() {
                 let msg = if tok_isalpha(ch) {
                     "unknown flag"
                 } else {
@@ -1397,7 +1568,7 @@ impl Parser {
                 return Err(self.source.error(msg, ch.len()));
             }
             loop {
-                let flag = flag_value(ch).unwrap_or(0);
+                let flag = self.flag(ch).unwrap_or(0);
                 if flag & flags::TYPE_FLAGS != 0 {
                     return Err(self.source.error(
                         "bad inline flags: cannot turn off flags 'a', 'u' and 'L'",
@@ -1412,7 +1583,7 @@ impl Parser {
                 if ch.is(':') {
                     break;
                 }
-                if flag_value(ch).is_none() {
+                if self.flag(ch).is_none() {
                     let msg = if tok_isalpha(ch) {
                         "unknown flag"
                     } else {
@@ -1421,6 +1592,11 @@ impl Parser {
                     return Err(self.source.error(msg, ch.len()));
                 }
             }
+        }
+        if del_flags & flags::TEMPLATE != 0 {
+            return Err(self
+                .source
+                .error("bad inline flags: cannot turn off global flag", 1));
         }
         if add_flags & del_flags != 0 {
             return Err(self

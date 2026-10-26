@@ -1,12 +1,26 @@
 //! The few `str` methods and `unicodedata` services `_parser.py` relies on.
 //!
 //! Non-ASCII character properties come from the Unicode tables bundled with
-//! `regex-syntax` (via fancy-regex), restricted with `\p{Age=15.1}` to the
-//! characters CPython 3.13's Unicode 15.1.0 database knows.
+//! `regex-syntax` (via fancy-regex), restricted with `\p{Age=...}` to the
+//! characters the running Python's Unicode database knows.
 
 use std::sync::OnceLock;
 
 use fancy_regex::Regex;
+
+/// The Unicode version of `unicodedata` in Python 3.10 to 3.14 (and later, until a
+/// newer one is needed).
+const AGES: [&str; 5] = ["13.0", "14.0", "15.0", "15.1", "16.0"];
+
+/// The index into the supported Unicode versions for a Python minor version.
+pub(crate) fn unicode_version(minor: u32) -> usize {
+    (minor.clamp(10, 14) - 10) as usize
+}
+
+/// The `Age` value of a Unicode version index.
+pub(crate) fn age(version: usize) -> &'static str {
+    AGES[version.min(AGES.len() - 1)]
+}
 
 /// Lazily compiled property matchers for non-ASCII input.
 struct Props {
@@ -15,17 +29,31 @@ struct Props {
     unprintable: Option<Regex>,
 }
 
+/// The matchers for the running Python's Unicode version.
 fn props() -> &'static Props {
-    static PROPS: OnceLock<Props> = OnceLock::new();
-    PROPS.get_or_init(|| Props {
-        identifier: Regex::new(
-            r"\A[[\p{XID_Start}_]&&\p{Age=15.1}][\p{XID_Continue}&&\p{Age=15.1}]*\z",
-        )
-        .ok(),
-        alpha: Regex::new(r"\A[\p{L}&&\p{Age=15.1}]\z").ok(),
-        // Cn as of Unicode 15.1 includes everything assigned later.
-        unprintable: Regex::new(r"\A[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}[^\p{Age=15.1}]]\z")
+    static PROPS: [OnceLock<Props>; AGES.len()] = [const { OnceLock::new() }; AGES.len()];
+    let version = unicode_version(crate::context::python_minor());
+    PROPS[version].get_or_init(|| {
+        let age = age(version);
+        // Unicode 15.1 made ZWNJ, ZWJ and the two katakana middle dots identifier
+        // characters.
+        let not_yet_continue = if version < 3 {
+            r"--[\x{200c}\x{200d}\x{30fb}\x{ff65}]"
+        } else {
+            ""
+        };
+        Props {
+            identifier: Regex::new(&format!(
+                r"\A[[\p{{XID_Start}}_]&&\p{{Age={age}}}][\p{{XID_Continue}}&&\p{{Age={age}}}{not_yet_continue}]*\z"
+            ))
             .ok(),
+            alpha: Regex::new(&format!(r"\A[\p{{L}}&&\p{{Age={age}}}]\z")).ok(),
+            // Cn as of that version includes everything assigned later.
+            unprintable: Regex::new(&format!(
+                r"\A[\p{{Cc}}\p{{Cf}}\p{{Co}}\p{{Cn}}\p{{Zl}}\p{{Zp}}\p{{Zs}}[^\p{{Age={age}}}]]\z"
+            ))
+            .ok(),
+        }
     })
 }
 

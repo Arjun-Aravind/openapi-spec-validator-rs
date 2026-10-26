@@ -13,10 +13,13 @@
 //!   under `(?a)` only ASCII letters fold.
 
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
-use super::ast::{At, Category, ClassItem, MAXREPEAT, Node, RepeatKind, Width, flags, width};
+use super::ast::{
+    At, Category, ClassItem, MAXREPEAT, Node, RepeatKind, Width, WidthRules, flags, width,
+};
 use super::parser::Parsed;
-use super::unicode::UNRESOLVED_NAME;
+use super::unicode::{UNRESOLVED_NAME, age};
 
 /// A class that matches nothing (`FAILURE`, lone surrogates).
 const NEVER: &str = r"[^\x{0}-\x{10FFFF}]";
@@ -25,12 +28,28 @@ const ANY_CHAR: &str = r"[\x{0}-\x{10FFFF}]";
 
 /// The categories as (nested) classes: `CH_UNICODE` (`str.isdecimal`,
 /// `str.isspace`, `str.isalnum() or '_'`) and the ASCII variants. Unicode
-/// properties are pinned to CPython 3.13's Unicode 15.1 with `Age` (cumulative),
-/// since regex-syntax may ship a newer Unicode version.
-const UNI_DIGIT: &str = r"[\p{Nd}&&\p{Age=15.1}]";
-const UNI_NOT_DIGIT: &str = r"[^[\p{Nd}&&\p{Age=15.1}]]";
-const UNI_WORD: &str = r"[[\p{L}\p{N}\x{5f}]&&\p{Age=15.1}]";
-const UNI_NOT_WORD: &str = r"[^[[\p{L}\p{N}\x{5f}]&&\p{Age=15.1}]]";
+/// properties are pinned to the running Python's Unicode version with `Age`
+/// (cumulative), since regex-syntax may ship a newer one.
+struct UnicodeClasses {
+    digit: String,
+    not_digit: String,
+    word: String,
+    not_word: String,
+}
+
+/// The [`UnicodeClasses`] of a Unicode version (see `unicode::unicode_version`).
+fn unicode_classes(version: usize) -> &'static UnicodeClasses {
+    static CLASSES: [OnceLock<UnicodeClasses>; 5] = [const { OnceLock::new() }; 5];
+    CLASSES[version.min(CLASSES.len() - 1)].get_or_init(|| {
+        let age = age(version);
+        UnicodeClasses {
+            digit: format!(r"[\p{{Nd}}&&\p{{Age={age}}}]"),
+            not_digit: format!(r"[^[\p{{Nd}}&&\p{{Age={age}}}]]"),
+            word: format!(r"[[\p{{L}}\p{{N}}\x{{5f}}]&&\p{{Age={age}}}]"),
+            not_word: format!(r"[^[[\p{{L}}\p{{N}}\x{{5f}}]&&\p{{Age={age}}}]]"),
+        }
+    })
+}
 const UNI_SPACE: &str = r"[\x{9}-\x{d}\x{1c}-\x{20}\x{85}\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}]";
 const UNI_NOT_SPACE: &str = r"[^\x{9}-\x{d}\x{1c}-\x{20}\x{85}\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}]";
 const ASCII_DIGIT: &str = "[0-9]";
@@ -113,6 +132,7 @@ pub(crate) fn translate(parsed: &Parsed, harden: bool) -> Result<String, String>
         open_groups: Vec::new(),
         harden,
         empty_non_boundary: parsed.empty_non_boundary,
+        unicode: unicode_classes(parsed.unicode_version),
     };
     if let Some((negate, items)) = charset_prefix_quirk(parsed) {
         // `_compile_info` compiles the leading charset with the global flags,
@@ -248,7 +268,7 @@ fn iscased(cp: u32, ascii: bool) -> bool {
 /// *global* meaning of those categories, e.g. `re.search(r'(?a)(?u:\w)', 'é')`
 /// is `None`. Returns that prefilter set when it differs from the pattern's.
 fn charset_prefix_quirk(parsed: &Parsed) -> Option<(bool, Vec<ClassItem>)> {
-    if width(&parsed.nodes, &parsed.groupwidths).0 == 0 {
+    if width(&parsed.nodes, &parsed.groupwidths, WidthRules::Current).0 == 0 {
         return None; // no info-block prefix for patterns that can match empty
     }
     let (negate, items, f) = leading_charset(&parsed.nodes, parsed.flags)?;
@@ -277,6 +297,8 @@ struct Translator {
     harden: bool,
     /// `\B` matches the empty string (Python 3.14).
     empty_non_boundary: bool,
+    /// The categories of the running Python's Unicode version.
+    unicode: &'static UnicodeClasses,
 }
 
 fn has_capture(nodes: &[Node]) -> bool {
@@ -307,14 +329,14 @@ fn push_char(out: &mut String, cp: u32) {
     }
 }
 
-fn category_class(cat: Category, ascii: bool) -> &'static str {
+fn category_class(cat: Category, ascii: bool, unicode: &'static UnicodeClasses) -> &'static str {
     match (cat, ascii) {
-        (Category::Digit, false) => UNI_DIGIT,
-        (Category::NotDigit, false) => UNI_NOT_DIGIT,
+        (Category::Digit, false) => &unicode.digit,
+        (Category::NotDigit, false) => &unicode.not_digit,
         (Category::Space, false) => UNI_SPACE,
         (Category::NotSpace, false) => UNI_NOT_SPACE,
-        (Category::Word, false) => UNI_WORD,
-        (Category::NotWord, false) => UNI_NOT_WORD,
+        (Category::Word, false) => &unicode.word,
+        (Category::NotWord, false) => &unicode.not_word,
         (Category::Digit, true) => ASCII_DIGIT,
         (Category::NotDigit, true) => ASCII_NOT_DIGIT,
         (Category::Space, true) => ASCII_SPACE,
@@ -325,9 +347,14 @@ fn category_class(cat: Category, ascii: bool) -> &'static str {
 }
 
 /// Appends the categories as nested-class members.
-fn push_categories(out: &mut String, cats: &[Category], ascii: bool) {
+fn push_categories(
+    out: &mut String,
+    cats: &[Category],
+    ascii: bool,
+    unicode: &'static UnicodeClasses,
+) {
     for &cat in cats {
-        out.push_str(category_class(cat, ascii));
+        out.push_str(category_class(cat, ascii, unicode));
     }
 }
 
@@ -654,6 +681,7 @@ impl Translator {
             }
         }
         let has_lits = ranges_have_chars(&ranges);
+        let unicode = self.unicode;
         let out = &mut self.out;
         if !has_lits && cats.is_empty() {
             out.push_str(if negate { ANY_CHAR } else { NEVER });
@@ -663,7 +691,7 @@ impl Translator {
             // Fold the literal part only.
             if negate {
                 out.push_str("(?:(?![");
-                push_categories(out, &cats, ascii);
+                push_categories(out, &cats, ascii, unicode);
                 out.push_str("])(?i:[^");
                 push_ranges(out, &ranges);
                 out.push_str("]))");
@@ -671,7 +699,7 @@ impl Translator {
                 out.push_str("(?:(?i:[");
                 push_ranges(out, &ranges);
                 out.push_str("])|[");
-                push_categories(out, &cats, ascii);
+                push_categories(out, &cats, ascii, unicode);
                 out.push_str("])");
             }
             return;
@@ -685,7 +713,7 @@ impl Translator {
             out.push('^');
         }
         push_ranges(out, &ranges);
-        push_categories(out, &cats, ascii);
+        push_categories(out, &cats, ascii, unicode);
         out.push(']');
         if wrap {
             out.push(')');
@@ -697,7 +725,7 @@ impl Translator {
         let word = if f & flags::ASCII != 0 {
             ASCII_WORD
         } else {
-            UNI_WORD
+            &self.unicode.word
         };
         let out = &mut self.out;
         match at {

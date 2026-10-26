@@ -43,6 +43,9 @@ pub enum ErrorKind {
     Recursion,
     /// `TypeError` (only reachable with more than `MAXGROUPS` unnamed groups).
     Type,
+    /// `RuntimeError: invalid SRE code`, Python 3.10's verdict on a look-behind of 2**31
+    /// characters or more.
+    Runtime,
 }
 
 impl ErrorKind {
@@ -54,6 +57,7 @@ impl ErrorKind {
             ErrorKind::Value => "ValueError",
             ErrorKind::Recursion => "RecursionError",
             ErrorKind::Type => "TypeError",
+            ErrorKind::Runtime => "RuntimeError",
         }
     }
 }
@@ -311,6 +315,71 @@ mod tests {
             assert!(PyRegex::compile("\\B").unwrap().search("").unwrap());
             assert!(!PyRegex::compile("\\B").unwrap().search("a").unwrap());
         });
+    }
+
+    #[test]
+    fn python_3_10_to_3_12_syntax() {
+        use crate::context::with_python_minor;
+        let compile = |minor, pattern| with_python_minor(minor, || PyRegex::compile(pattern));
+        let message = |minor, pattern| compile(minor, pattern).unwrap_err().python_str(pattern);
+        let matches = |minor, pattern, text| {
+            with_python_minor(minor, || PyRegex::compile(pattern).unwrap().search(text))
+        };
+        // Atomic groups and possessive repeats arrived in 3.11.
+        assert_eq!(message(10, "(?>a)"), "unknown extension ?> at position 1");
+        assert_eq!(message(10, "a*+"), "multiple repeat at position 2");
+        assert!(compile(11, "(?>a)").is_ok() && compile(11, "a*+").is_ok());
+        // Until 3.11, global flags may come anywhere and apply to the whole pattern,
+        // `(?x)` included.
+        assert_eq!(matches(10, "a(?i)B", "Ab"), Ok(true));
+        assert_eq!(matches(10, "a b(?x)", "ab"), Ok(true));
+        assert_eq!(
+            message(11, "a(?i)B"),
+            "global flags not at the start of the expression at position 1"
+        );
+        // `(?t)` until 3.13.
+        assert!(compile(12, "(?t)a").is_ok());
+        assert_eq!(
+            message(12, "(?t)a*"),
+            "internal: unsupported template operator MAX_REPEAT"
+        );
+        assert_eq!(
+            message(12, "(?t:a)"),
+            "bad inline flags: cannot turn on global flag at position 3"
+        );
+        assert_eq!(message(13, "(?t)a"), "unknown extension ?t at position 1");
+        // `chr()` overflowed a C int until 3.13.
+        assert_eq!(
+            compile(12, "\\UFFFFFFFF").unwrap_err().kind,
+            ErrorKind::Overflow
+        );
+        assert_eq!(compile(13, "\\UFFFFFFFF").unwrap_err().kind, ErrorKind::Re);
+        // Until 3.12, a numeric condition is read with `int()`.
+        assert_eq!(
+            message(11, "(?(+1)a)"),
+            "invalid group reference 1 at position 3"
+        );
+        assert_eq!(
+            message(11, "(?(\u{661}0)a)"),
+            "invalid group reference 10 at position 3"
+        );
+        assert_eq!(
+            message(11, "(?(-1)a)"),
+            "bad character in group name '-1' at position 3"
+        );
+        assert_eq!(
+            message(12, "(?(+1)a)"),
+            "bad character in group name '+1' at position 3"
+        );
+        // Python 3.10's `_sre` rejects a look-behind of 2**31 characters.
+        assert_eq!(
+            compile(10, "(?<=a{2147483648})").unwrap_err().kind,
+            ErrorKind::Runtime
+        );
+        assert!(compile(11, "(?<=a{2147483648})").is_ok());
+        // Unicode 15.1 made ZWJ an identifier character.
+        assert!(compile(12, "(?P<a\u{200d}b>x)").is_err());
+        assert!(compile(13, "(?P<a\u{200d}b>x)").is_ok());
     }
 
     #[test]

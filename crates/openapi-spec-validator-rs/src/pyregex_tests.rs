@@ -45,6 +45,7 @@ fn kind_name(kind: ErrorKind) -> &'static str {
         ErrorKind::Value => "value",
         ErrorKind::Recursion => "recursion",
         ErrorKind::Type => "type",
+        ErrorKind::Runtime => "runtime",
     }
 }
 
@@ -252,6 +253,10 @@ fn contains(ranges: &[(u32, u32)], cp: u32) -> bool {
 
 #[test]
 fn character_classes_match_cpython() {
+    with_fixture_python(character_classes_match_cpython_inner);
+}
+
+fn character_classes_match_cpython_inner() {
     let cases = fixture("classes.json");
     let mut total_bad = 0;
     for case in &cases {
@@ -289,6 +294,10 @@ fn character_classes_match_cpython() {
 
 #[test]
 fn casefold_matches_cpython() {
+    with_fixture_python(casefold_matches_cpython_inner);
+}
+
+fn casefold_matches_cpython_inner() {
     let cases = fixture("casefold.json");
     let mut bad = Vec::new();
     let mut checks = 0;
@@ -332,6 +341,10 @@ fn ranges_of(v: &Value) -> Vec<(u32, u32)> {
 /// every non-ASCII code point, observed through compile results and messages.
 #[test]
 fn unicode_properties_match_cpython() {
+    with_fixture_python(unicode_properties_match_cpython_inner);
+}
+
+fn unicode_properties_match_cpython_inner() {
     let path = fixture_dir().join("chars.json");
     let chars: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let start = ranges_of(&chars["ident_start"]);
