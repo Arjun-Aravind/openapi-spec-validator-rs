@@ -209,6 +209,7 @@ fn write_repr(value: &Value, sort_dicts: bool, out: &mut String) {
         Value::Number(n) => write_repr_number(n, out),
         Value::String(s) => write_repr_str(s, out),
         Value::Array(items) => {
+            crate::context::check();
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
@@ -219,6 +220,7 @@ fn write_repr(value: &Value, sort_dicts: bool, out: &mut String) {
             out.push(']');
         }
         Value::Object(map) => {
+            crate::context::check();
             out.push('{');
             for (i, (k, v)) in dict_items(map, sort_dicts).into_iter().enumerate() {
                 if i > 0 {

@@ -638,6 +638,8 @@ fn convert_relative(
     parent_instance_path: &[PathItem],
     parent_schema_path: &[PathItem],
 ) -> ValidationError {
+    // Converting a large error tree takes a while: a cancelled validation stops here.
+    crate::context::check();
     // jsonschema validates each key against `propertyNames` as an instance of its own,
     // at the object's path; the crate wraps that error, whose paths are the ones to use.
     let paths = error;
@@ -1146,4 +1148,39 @@ fn python_message(
 
 fn join_reprs<'s>(items: impl Iterator<Item = &'s str>) -> String {
     items.map(pyrepr::repr_str).collect::<Vec<_>>().join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::context::{Cancelled, run_cancellable};
+
+    #[test]
+    fn converting_errors_stops_once_cancelled() {
+        let spec = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {"S": {"allOf": [{"type": 1}]}}},
+        });
+        let validator = document_validator(SpecVersion::V3_0);
+        let errors: Vec<_> = validator.iter_errors(&spec).collect();
+        assert!(!errors.is_empty());
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_cancellable(cancelled, || {
+                convert_errors(
+                    errors.into_iter(),
+                    &document_schemas(SpecVersion::V3_0),
+                    &spec,
+                )
+            })
+        }));
+        assert!(unwound.expect_err("cancelled").is::<Cancelled>());
+    }
 }
