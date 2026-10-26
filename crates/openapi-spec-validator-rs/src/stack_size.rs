@@ -7,7 +7,10 @@
 /// Bytes between the current stack pointer and the end of the thread's stack, when the
 /// platform tells.
 pub(crate) fn remaining() -> Option<usize> {
-    let here = std::ptr::from_ref(&0u8) as usize;
+    // A local, so that its address is on this thread's stack: `&0u8` would point to a
+    // constant in the binary.
+    let marker = 0u8;
+    let here = std::hint::black_box(std::ptr::from_ref(&marker)) as usize;
     let lowest = lowest_address()?;
     here.checked_sub(lowest)
 }

@@ -3,7 +3,7 @@
 //! fail with an error instead of overflowing it.
 
 use openapi_spec_validator_rs::{
-    LoadError, Options, Outcome, STACK_TOO_SMALL, load, validate, within_this_stack,
+    LoadError, Options, Outcome, STACK_TOO_SMALL, load, nesting_limit, validate, within_this_stack,
 };
 use serde_json::{Value, json};
 
@@ -29,6 +29,28 @@ fn on_small_thread<T: Send>(f: impl FnOnce() -> T + Send) -> T {
             .join()
             .expect("no overflow")
     })
+}
+
+/// How deeply documents may nest on a fresh thread with a `stack_size` stack.
+fn nesting_allowed(stack_size: usize) -> Option<usize> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(stack_size)
+            .spawn_scoped(scope, || within_this_stack(nesting_limit))
+            .expect("thread")
+            .join()
+            .expect("no overflow")
+    })
+}
+
+#[test]
+fn the_nesting_allowed_follows_what_is_left_of_the_stack() {
+    // 2 KiB per level, after a 512 KiB reserve and what the thread already uses (the
+    // platform may round the size up a little).
+    let small = nesting_allowed(1 << 20).expect("a limit");
+    assert!((150..=300).contains(&small), "{small}");
+    let large = nesting_allowed(16 << 20).expect("a limit");
+    assert!((7_500..=8_000).contains(&large), "{large}");
 }
 
 #[test]
