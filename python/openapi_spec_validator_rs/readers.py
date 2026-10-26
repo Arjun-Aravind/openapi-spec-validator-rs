@@ -33,10 +33,11 @@ def read_from_filename(filename: str | os.PathLike[str]) -> tuple[Any, str]:
     is not a file, and :class:`~openapi_spec_validator_rs.SpecReadError` when it cannot
     be parsed.
     """
-    _core._check_finalizing()
     filename = os.fspath(filename)
     if not os.path.isfile(filename):
         raise OSError(f"No such file: {filename}")
+    # Upstream then opens it with `urlopen`, which fails like this at shutdown.
+    _core._check_finalizing()
     uri = Path(os.path.abspath(filename)).as_uri()
     with open(filename, "rb") as stream:
         data = handlers.read_stream(stream)

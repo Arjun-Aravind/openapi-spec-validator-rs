@@ -45,7 +45,8 @@ def _environ(name: str) -> Any:
 
 
 def _cache_maxsize(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
+    # `bool` is an `int` here, as for upstream's validator.
+    if not isinstance(value, (int, str)):
         return RESOLVED_CACHE_MAXSIZE_DEFAULT
     try:
         parsed = int(value)
@@ -65,7 +66,6 @@ def _backend(value: Any) -> str:
         "Expected one of: auto, jsonschema, jsonschema-rs. "
         "Falling back to auto.",
         UserWarning,
-        stacklevel=3,
     )
     return SCHEMA_VALIDATOR_BACKEND_DEFAULT
 
@@ -78,9 +78,12 @@ class OpenAPISpecValidatorSettings:
 
     def __init__(
         self,
+        *,
         resolved_cache_maxsize: Any = _MISSING,
         schema_validator_backend: Any = _MISSING,
+        **_ignored: Any,
     ) -> None:
+        # pydantic-settings takes keyword arguments only and ignores unknown ones.
         if resolved_cache_maxsize is _MISSING:
             resolved_cache_maxsize = _environ("resolved_cache_maxsize")
         if schema_validator_backend is _MISSING:
