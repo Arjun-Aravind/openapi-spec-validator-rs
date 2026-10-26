@@ -484,8 +484,8 @@ pub(crate) fn scheme(url: &str) -> String {
 /// drops it. A path without `//` (`file:etc/x`, what `urljoin` makes of more `..`
 /// segments than the base has directories) is relative to the current directory.
 ///
-/// The host check is an approximation: Python compares the addresses the host name
-/// resolves to with this machine's; here only `localhost` and `127.0.0.1` count.
+/// As Python, a host counts as this machine when its address is one of this machine's,
+/// which takes a DNS lookup for other names than `localhost` and IP addresses.
 pub(crate) fn file_url_path(url: &str, python_minor: u32) -> Option<Vec<u8>> {
     // `Request` strips the URL and a `<URL:...>` wrapping.
     let url = url.trim();
@@ -497,7 +497,7 @@ pub(crate) fn file_url_path(url: &str, python_minor: u32) -> Option<Vec<u8>> {
     if python_minor >= 14 {
         // `url2pathname(full_url, require_scheme=True, resolve_host=True)`.
         let parsed = urlsplit(url, "").ok()?;
-        if parsed.scheme != "file" || !is_local_host(&parsed.netloc) {
+        if parsed.scheme != "file" || !is_local_authority(&parsed.netloc) {
             return None;
         }
         return Some(unquote_bytes(&parsed.path));
@@ -520,7 +520,13 @@ pub(crate) fn file_url_path(url: &str, python_minor: u32) -> Option<Vec<u8>> {
     };
     if let Some(host) = host.as_deref().filter(|host| !host.is_empty()) {
         // `file_open` passes such a selector on to nothing when the host is remote.
-        if selector.starts_with("//") && !selector[2..].starts_with('/') && host != "localhost" {
+        if selector.starts_with("//")
+            && !selector[2..].starts_with('/')
+            && host != "localhost"
+            && !local_addresses()
+                .iter()
+                .any(|address| address.to_string() == host)
+        {
             return None;
         }
         // `open_local_file`: `_splitport`, then a host without a port must be this one.
@@ -550,8 +556,64 @@ pub(crate) fn file_url_path(url: &str, python_minor: u32) -> Option<Vec<u8>> {
     Some(unquote_bytes(selector))
 }
 
+/// `_safe_gethostbyname(host) in FileHandler().get_names()`: the host's address is one of
+/// this machine's.
 fn is_local_host(host: &str) -> bool {
-    host.is_empty() || host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1"
+    ipv4_address(host).is_some_and(|address| local_addresses().contains(&address))
+}
+
+/// Python 3.14's `_is_local_authority(authority, resolve=True)`: also this machine's name
+/// as it is, even when it does not resolve.
+fn is_local_authority(authority: &str) -> bool {
+    authority.is_empty()
+        || authority == "localhost"
+        || hostname().as_deref() == Some(authority)
+        || is_local_host(authority)
+}
+
+/// `socket.gethostbyname(host)`: an IPv4 address of `host`.
+fn ipv4_address(host: &str) -> Option<std::net::Ipv4Addr> {
+    ipv4_addresses(host).into_iter().next()
+}
+
+/// `socket.gethostbyname_ex(host)[2]`.
+fn ipv4_addresses(host: &str) -> Vec<std::net::Ipv4Addr> {
+    use std::net::{SocketAddr, ToSocketAddrs};
+    let mut addresses = Vec::new();
+    for address in (host, 0).to_socket_addrs().into_iter().flatten() {
+        if let SocketAddr::V4(address) = address {
+            if !addresses.contains(address.ip()) {
+                addresses.push(*address.ip());
+            }
+        }
+    }
+    addresses
+}
+
+/// `FileHandler.get_names()`: the addresses of `localhost` and of this machine's name,
+/// looked up once.
+fn local_addresses() -> &'static [std::net::Ipv4Addr] {
+    static NAMES: std::sync::OnceLock<Vec<std::net::Ipv4Addr>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = ipv4_addresses("localhost");
+        names.extend(hostname().map_or_else(Vec::new, |name| ipv4_addresses(&name)));
+        names
+    })
+}
+
+/// `socket.gethostname()`.
+#[cfg(unix)]
+fn hostname() -> Option<String> {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the buffer is writable for its whole length, which is passed along.
+    let found = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+    let end = buffer.iter().position(|&b| b == 0)?;
+    found.then(|| String::from_utf8_lossy(&buffer[..end]).into_owned())
+}
+
+#[cfg(not(unix))]
+fn hostname() -> Option<String> {
+    None
 }
 
 /// The byte a `%XX` escape at the start of `text` stands for.
@@ -777,6 +839,21 @@ mod tests {
         for (url, expected) in cases {
             let actual = outcome(urldefrag(&url).map(|(u, f)| vec![u, f]));
             assert_eq!(actual, expected, "urldefrag({url:?})");
+        }
+    }
+
+    #[test]
+    fn this_machine_counts_as_local() {
+        // An address of this machine.
+        assert_eq!(
+            file_url_path("file://127.0.0.1/d/b.json", 13),
+            Some(b"/d/b.json".to_vec())
+        );
+        // Its name, as it is, from Python 3.14; before, when it resolves to one of its
+        // addresses.
+        if let Some(name) = hostname() {
+            let url = format!("file://{name}/d/b.json");
+            assert_eq!(file_url_path(&url, 14), Some(b"/d/b.json".to_vec()));
         }
     }
 
