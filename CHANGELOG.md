@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- By default only the first error is reported, and now only that error is built, as
+  upstream's lazy iteration does. The document check used to build every error and
+  then keep the first, and for Swagger 2.0 and OpenAPI 3.0 each `oneOf` failure copied
+  the failing value into the errors of every branch: a 678-byte 3.0 document whose
+  invalid schemas nest and repeat took 1.3 GB and 3 s, where upstream needs 55 MB; it
+  now takes 38 MB and 0.6 s. With `--validation-errors all` the same document takes
+  about half the memory it did.
+- Ctrl-C now also stops the conversion and printing of errors, which went on to the
+  end before (1.5 CPU seconds and over 1 GB after an interrupt on such a document).
+- Validating while the interpreter shuts down (from a `__del__` at exit) raises the
+  `ImportError` upstream raises there, instead of hanging (Python 3.11 and 3.13) or
+  raising `PanicException`.
+- When no thread can be started (a `ulimit -v` or process limit), validation runs on
+  the calling thread instead of failing with `RuntimeError: cannot start the validation
+  thread`, and the `pip` command no longer prints a traceback. Each validation also
+  needs one thread instead of two and reserves 64 MiB of stack instead of 320 MiB.
+- `file:` references are opened as Python's `urlopen` opens them: a `$ref` with more
+  `../` segments than its base has directories no longer reads a file from the root
+  (`/etc/passwd`); like upstream on Python 3.13, it is relative to the working
+  directory. Percent-escapes, `localhost` and other hosts follow `urlopen` too.
+- A `$ref` at the root of a document is followed as upstream's `validate()` follows it,
+  checking the document it points to (upstream's `iter_errors()` and its command line's
+  `--validation-errors all` check the document as given, and so does this port).
+- Deeply nested valid documents validate 3 to 4 times faster than in 0.2.3 (0.4 to
+  0.6 ms for 100 nested schemas, which took 1.8 ms).
+
+### Added
+
+- Python 3.14's standard library is followed where upstream's output depends on it
+  (`urljoin`, `file:` URLs with a query, `\z` and `\B` in patterns, and the wording of
+  several errors). The Python package follows the interpreter it runs on; the command
+  line takes `--python-version 3.13` (the default for the Rust binary) or `3.14`.
+- The `settings`, `schemas` and `versions.finders` modules upstream has.
+
+### Changed
+
+- CI tests Python 3.14 too.
+
 ## [0.2.3] - 2026-10-26
 
 ### Fixed
