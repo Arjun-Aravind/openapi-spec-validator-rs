@@ -305,8 +305,10 @@ pub fn predicted_frames(spec: &Value, version: SpecVersion, at: Option<&str>) ->
 }
 
 /// Stack size for validation threads: enough for documents nested as deeply as the
-/// loader allows (pages are only committed as they are used).
-const STACK_SIZE: usize = 256 << 20;
+/// loader allows (pages are only committed as they are used). The deepest documents
+/// tried need 8 MiB in release builds and 32 MiB in debug builds; a reservation much
+/// larger than that only costs address space, which a `ulimit -v` limits.
+const STACK_SIZE: usize = 64 << 20;
 
 /// The stack size [`on_large_stack_thread`] expects of its caller's thread.
 ///

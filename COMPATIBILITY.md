@@ -178,10 +178,11 @@ a string (`'datetime.date' object is not iterable`) is raised with the same mess
   (the main interpreter or a subinterpreter, as under mod_wsgi). Another interpreter's
   import raises `ImportError`, because CPython would hand it the first interpreter's
   objects. Upstream, in pure Python, works in every subinterpreter.
-* Each validation reserves address space for a large thread stack (64 MiB, plus 256 MiB
-  per pass), and the allocator reserves about 1 GiB when the extension loads. Under a
-  virtual memory limit (`ulimit -v`) much below 2 GiB, validation raises `RuntimeError:
-  cannot start the validation thread`.
+* Each validation runs on a thread of its own with a large stack (64 MiB of address
+  space, committed only as used), and the allocator reserves about 1 GiB when the
+  extension loads. When no thread can be started (a virtual memory limit such as
+  `ulimit -v`, or a process limit), validation runs on the calling thread instead, and
+  Ctrl-C then takes effect only once it finishes.
 * Upstream's settings (`OPENAPI_SPEC_VALIDATOR_RESOLVED_CACHE_MAXSIZE`,
   `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND`) do not apply: validation always
   follows the default `jsonschema` backend.
