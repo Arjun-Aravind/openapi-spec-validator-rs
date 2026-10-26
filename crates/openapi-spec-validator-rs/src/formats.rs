@@ -356,6 +356,8 @@ fn match_hms(chars: &[char]) -> Option<(usize, u32)> {
     let ch = |i: usize| chars.get(i).copied();
     let dig = |i: usize| ch(i).and_then(decimal_value);
     let in_ascii = |i: usize, lo: char, hi: char| ch(i).is_some_and(|c| (lo..=hi).contains(&c));
+    // `%H` accepts a space-padded hour from Python 3.13.
+    let padded_hours = crate::context::python_minor() >= 13;
     // Each alternative yields (end, value) for a group starting at `p`, in regex order.
     let hours = |p: usize| -> Vec<usize> {
         let mut alts = Vec::new();
@@ -368,7 +370,7 @@ fn match_hms(chars: &[char]) -> Option<(usize, u32)> {
         if dig(p).is_some() {
             alts.push(p + 1);
         }
-        if ch(p) == Some(' ') && dig(p + 1).is_some() {
+        if padded_hours && ch(p) == Some(' ') && dig(p + 1).is_some() {
             alts.push(p + 2);
         }
         alts
