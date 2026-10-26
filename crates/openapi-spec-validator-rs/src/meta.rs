@@ -98,9 +98,14 @@ static PY_DRAFT7: LazyLock<Value> = LazyLock::new(|| {
 });
 
 /// A copy of `schema` for display, with the private meta-schema URIs given back their
-/// official values.
+/// official values (the Swagger 2.0 meta-schema's references to Draft 4 included).
 fn official_ids(schema: &Value) -> Value {
     let mut schema = schema.clone();
+    redirect_refs(
+        &mut schema,
+        &format!("{DRAFT4_URN}#"),
+        "http://json-schema.org/draft-04/schema",
+    );
     if let Value::Object(map) = &mut schema {
         for key in ["id", "$id"] {
             if let Some(Value::String(id)) = map.get_mut(key) {
