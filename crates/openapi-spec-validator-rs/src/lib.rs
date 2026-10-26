@@ -337,6 +337,7 @@ pub fn predicted_frames(spec: &Value, version: SpecVersion, at: Option<&str>) ->
         limit: usize::MAX,
     };
     let mut probe = frames::Probe::new(&schemas, budget, at.is_some());
+    probe.track_max_at = std::env::var_os("FRAMES_DEBUG").is_some();
     probe.run(instance);
     if std::env::var_os("FRAMES_DEBUG").is_some() {
         let (schema_path, instance_path) = &probe.max_at;

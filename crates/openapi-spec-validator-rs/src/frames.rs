@@ -76,8 +76,10 @@ pub(crate) struct Probe<'a> {
     available: usize,
     /// The deepest point reached, relative to the root (`iter_errors` is 0).
     pub max: usize,
-    /// Where it was reached (schema path, instance path).
+    /// Where it was reached (schema path, instance path), when `track_max_at` is set:
+    /// on a deep document a copy at every new maximum costs as much as the rest.
     pub max_at: (Vec<PathItem>, Vec<PathItem>),
+    pub track_max_at: bool,
     pub crossing: Option<Crossing>,
     /// The outermost instance locations where the limit is exceeded.
     pub prune: Vec<Vec<PathItem>>,
@@ -175,6 +177,7 @@ impl<'a> Probe<'a> {
             available: budget.available(),
             max: 0,
             max_at: (Vec::new(), Vec::new()),
+            track_max_at: false,
             crossing: None,
             prune: Vec::new(),
             schema_path: Vec::new(),
@@ -200,7 +203,9 @@ impl<'a> Probe<'a> {
     fn reach(&mut self, depth: usize) -> bool {
         if depth > self.max {
             self.max = depth;
-            self.max_at = (self.schema_path.clone(), self.instance_path.clone());
+            if self.track_max_at {
+                self.max_at = (self.schema_path.clone(), self.instance_path.clone());
+            }
         }
         if depth <= self.available {
             return true;
