@@ -623,9 +623,11 @@ impl Frame {
         }
     }
 
-    /// The `RecursionError` raised entering this call one level too deep, as upstream's check
-    /// of a `pattern` keyword words it: on Python 3.10 a comparison exceeds the limit first,
-    /// unless the level is a plain group or a look-around.
+    /// The `RecursionError` raised entering this call one level too deep. What exceeds the
+    /// limit first on Python 3.10 and 3.11 depends on the parity of upstream's stack depth
+    /// where it compiles the pattern, which varies with the document; this is what a direct
+    /// `re.compile` call meets: a comparison on 3.10, and on 3.11 a group's `SubPattern()`
+    /// call unless reading flags or a condition gets there first.
     fn recursion_message(&self, minor: u32) -> &'static str {
         let plain_group = matches!(
             &self.ret,
@@ -634,10 +636,10 @@ impl Frame {
                 ..
             })
         );
-        if minor <= 10 && !plain_group {
-            "maximum recursion depth exceeded in comparison"
-        } else {
-            "maximum recursion depth exceeded"
+        match minor {
+            ..=10 => "maximum recursion depth exceeded in comparison",
+            11 if plain_group => "maximum recursion depth exceeded while calling a Python object",
+            _ => "maximum recursion depth exceeded",
         }
     }
 
