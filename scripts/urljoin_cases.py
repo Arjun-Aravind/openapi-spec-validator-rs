@@ -1,10 +1,11 @@
 """Generate the `urljoin` / `urldefrag` fixtures the Rust port is tested against.
 
-Writes crates/openapi-spec-validator-rs/tests/fixtures/{urljoin,urldefrag}.json with the
-results of CPython's own `urllib.parse` functions, which upstream uses to resolve `$ref`s.
-Python 3.14 changed both; run with 3.14 or later, it writes urljoin-3.14.json and
-urldefrag-3.14.json instead.
-Usage: python3.13 scripts/urljoin_cases.py; python3.14 scripts/urljoin_cases.py
+Writes crates/openapi-spec-validator-rs/tests/fixtures/{urljoin,urldefrag}-3.X.json with the
+results of CPython's own `urllib.parse` functions, which upstream uses to resolve `$ref`s,
+for the Python 3.X running it. They differ between versions, so run it with the latest
+patch release of each version from 3.10 on (for example in the python:3.X-slim images).
+A `ValueError` is recorded as {"ValueError": message}.
+Usage: python3.X scripts/urljoin_cases.py
 """
 
 import json
@@ -18,6 +19,7 @@ BASES = [
     "https://H:8443/A/B;p?q", "http://u:p@h:80/a/b", "http://[::1]:8/a/b.json",
     "http://h/a;p/b;q?z", "HTTP://h/x", "ftp://h/a/b", "urn:isbn:123", "/a/b", "a/b",
     "http://h/sub/../x", "http://h/a/b/", "http://h/a\tb/c", " http://h/x", "http://h/x ",
+    "rtsps://h/a/b", "itms-services://h/a/b", "1x:/a/b",
 ]
 REFS = [
     "", "#", "#frag", "#/components/schemas/A", "?q=1", "?", ";p", "c;d", "x", "x.json",
@@ -29,28 +31,34 @@ REFS = [
     "http://", "//", "///x", "x/", "x//y", "/x//y", "x;p?q", "http://u:p@h/x",
     "http://[::1]/x", "http://[::1/x", "http://]/x", "c:/x", "c:x", "data:text/plain,hi",
     "\u00e9", "%41", "%zz", "a?b#c?d", "a#b#c", "a?b?c", "..\\x", "x\\y",
+    # Bracketed hosts (`_check_bracketed_netloc`) and schemes.
+    "http://[::1]x/a", "http://a[::1]/a", "http://[::1]]/a", "http://[[::1]/a",
+    "http://[::1]:80/a", "http://[::1]:x/a", "http://u@[::1]/a", "http://u[x]@h/a",
+    "http://[::1%eth0]/a", "http://[1.2.3.4]/a", "http://[host]/a", "http://[]/a",
+    "http://[v1.x]/a", "http://[V1.x]/a", "http://[v1.]/a", "http://[vg.x]/a", "http://[v.x]/a",
+    "1x:y", "+x:y", "rtsps://h/y", "itms-services://h/y",
 ]
 
 
 def result(base: str, ref: str):
     try:
         return urljoin(base, ref)
-    except ValueError:
-        return None
+    except ValueError as error:
+        return {"ValueError": str(error)}
 
 
 def main() -> None:
     out = pathlib.Path(__file__).resolve().parent.parent / "crates/openapi-spec-validator-rs/tests/fixtures"
     joins = [[b, r, result(b, r)] for b in BASES for r in REFS]
-    suffix = "-3.14" if sys.version_info >= (3, 14) else ""
+    suffix = "-%d.%d" % sys.version_info[:2]
     (out / f"urljoin{suffix}.json").write_text(json.dumps(joins, ensure_ascii=False, indent=0) + "\n")
-    urls = sorted({r for r in REFS} | {b for b in BASES} | {j[2] for j in joins if j[2]})
+    urls = sorted({r for r in REFS} | {b for b in BASES} | {j[2] for j in joins if isinstance(j[2], str)})
     defrags = []
     for url in urls:
         try:
             defrags.append([url, list(urldefrag(url))])
-        except ValueError:
-            defrags.append([url, None])
+        except ValueError as error:
+            defrags.append([url, {"ValueError": str(error)}])
     (out / f"urldefrag{suffix}.json").write_text(json.dumps(defrags, ensure_ascii=False, indent=0) + "\n")
     print(f"{len(joins)} urljoin cases, {len(defrags)} urldefrag cases")
 

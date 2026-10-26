@@ -473,6 +473,15 @@ fn parse_octet(octet: &str) -> Result<u32, String> {
     Ok(value)
 }
 
+/// `ipaddress.ip_address(s)`: `Some(true)` for an IPv4 address, `Some(false)` for an IPv6
+/// address, `None` for neither.
+pub(crate) fn ip_address_is_v4(s: &str) -> Option<bool> {
+    if ipv4_from_str(s).is_ok() {
+        return Some(true);
+    }
+    (!matches!(is_ipv6(s), Check::Raised(_))).then_some(false)
+}
+
 /// `is_ipv6`: `IPv6Address(s)` (AddressValueError is the cause), then `not address.scope_id`.
 fn is_ipv6(s: &str) -> Check {
     if s.contains('/') {

@@ -44,6 +44,18 @@ const USES_PARAMS: &[&str] = &[
     "sip", "sips", "mms", "sftp", "tel",
 ];
 
+/// Whether `scheme` is in one of the lists above for the running Python: `rtsps` joined
+/// them in 3.11, and `itms-services` joined `uses_netloc` in 3.12.
+fn uses(list: &[&str], scheme: &str) -> bool {
+    let minor = crate::context::python_minor();
+    list.contains(&scheme)
+        && match scheme {
+            "rtsps" => minor >= 11,
+            "itms-services" => minor >= 12,
+            _ => true,
+        }
+}
+
 /// `urllib.parse.ParseResult`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Parsed {
@@ -77,8 +89,10 @@ fn urlsplit(url: &str, default_scheme: &str) -> Result<Parsed, String> {
         .collect();
     let mut rest = url.as_str();
     if let Some(i) = url.find(':') {
-        if i > 0 && url.as_bytes()[0].is_ascii_alphabetic() && url[..i].chars().all(is_scheme_char)
-        {
+        // A scheme starts with a letter from Python 3.11.
+        let first = url.as_bytes()[0];
+        let starts_well = first.is_ascii_alphabetic() || crate::context::python_minor() <= 10;
+        if i > 0 && starts_well && url[..i].chars().all(is_scheme_char) {
             scheme = url[..i].to_ascii_lowercase();
             rest = &url[i + 1..];
         }
@@ -88,9 +102,7 @@ fn urlsplit(url: &str, default_scheme: &str) -> Result<Parsed, String> {
         let end = after.find(['/', '?', '#']).unwrap_or(after.len());
         netloc = &after[..end];
         rest = &after[end..];
-        if netloc.contains('[') != netloc.contains(']') {
-            return Err("Invalid IPv6 URL".to_owned());
-        }
+        check_brackets(netloc)?;
     }
     let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -104,10 +116,65 @@ fn urlsplit(url: &str, default_scheme: &str) -> Result<Parsed, String> {
     })
 }
 
+/// The bracket checks of `urlsplit` on a netloc: brackets come in pairs, around an IPv6
+/// address or an IPvFuture (`_check_bracketed_netloc`).
+fn check_brackets(netloc: &str) -> Result<(), String> {
+    let invalid = || Err("Invalid IPv6 URL".to_owned());
+    match (netloc.contains('['), netloc.contains(']')) {
+        (false, false) => return Ok(()),
+        (true, true) => {}
+        _ => return invalid(),
+    }
+    let host_and_port = netloc.rsplit_once('@').map_or(netloc, |(_, host)| host);
+    let hostname = match host_and_port.split_once('[') {
+        Some((before, bracketed)) => {
+            // No data before the bracket, nor between it and the port.
+            let (hostname, port) = bracketed.split_once(']').unwrap_or((bracketed, ""));
+            if !before.is_empty() || !(port.is_empty() || port.starts_with(':')) {
+                return invalid();
+            }
+            hostname
+        }
+        None => host_and_port
+            .split_once(':')
+            .map_or(host_and_port, |(host, _)| host),
+    };
+    // `_check_bracketed_host`; an uppercase `V` from Python 3.13.
+    let future = if crate::context::python_minor() >= 13 {
+        hostname.starts_with(['v', 'V'])
+    } else {
+        hostname.starts_with('v')
+    };
+    if future {
+        let version = &hostname[1..];
+        let hex = version.len()
+            - version
+                .trim_start_matches(|c: char| c.is_ascii_hexdigit())
+                .len();
+        let valid = hex > 0
+            && version[hex..]
+                .strip_prefix('.')
+                .is_some_and(|address| !address.is_empty() && !address.contains('\n'));
+        return if valid {
+            Ok(())
+        } else {
+            Err("IPvFuture address is invalid".to_owned())
+        };
+    }
+    match crate::formats::ip_address_is_v4(hostname) {
+        Some(false) => Ok(()),
+        Some(true) => Err("An IPv4 address cannot be in brackets".to_owned()),
+        None => Err(format!(
+            "{} does not appear to be an IPv4 or IPv6 address",
+            crate::pyrepr::repr_str(hostname)
+        )),
+    }
+}
+
 /// `urlparse(url, scheme)`: `urlsplit` plus the `;params` of the last path segment.
 pub(crate) fn urlparse(url: &str, default_scheme: &str) -> Result<Parsed, String> {
     let mut parsed = urlsplit(url, default_scheme)?;
-    if USES_PARAMS.contains(&parsed.scheme.as_str()) && parsed.path.contains(';') {
+    if uses(USES_PARAMS, &parsed.scheme) && parsed.path.contains(';') {
         let path = &parsed.path;
         let split = match path.rfind('/') {
             Some(slash) => path[slash..].find(';').map(|i| slash + i),
@@ -133,9 +200,18 @@ pub(crate) fn urlunparse(parsed: &Parsed) -> String {
             url.insert(0, '/');
         }
         url = format!("//{}{url}", parsed.netloc);
+    } else if crate::context::python_minor() <= 11 {
+        // Until Python 3.12, any scheme of `uses_netloc` gets a (possibly empty) netloc.
+        if url.starts_with("//") || (!parsed.scheme.is_empty() && uses(USES_NETLOC, &parsed.scheme))
+        {
+            if !url.is_empty() && !url.starts_with('/') {
+                url.insert(0, '/');
+            }
+            url = format!("//{url}");
+        }
     } else if url.starts_with("//")
         || (!parsed.scheme.is_empty()
-            && USES_NETLOC.contains(&parsed.scheme.as_str())
+            && uses(USES_NETLOC, &parsed.scheme)
             && (url.is_empty() || url.starts_with('/')))
     {
         url = format!("//{url}");
@@ -172,10 +248,10 @@ fn urljoin_313(base: &str, url: &str) -> Result<String, String> {
     }
     let b = urlparse(base, "")?;
     let mut u = urlparse(url, &b.scheme)?;
-    if u.scheme != b.scheme || !USES_RELATIVE.contains(&u.scheme.as_str()) {
+    if u.scheme != b.scheme || !uses(USES_RELATIVE, &u.scheme) {
         return Ok(url.to_owned());
     }
-    if USES_NETLOC.contains(&u.scheme.as_str()) {
+    if uses(USES_NETLOC, &u.scheme) {
         if !u.netloc.is_empty() {
             return Ok(urlunparse(&u));
         }
@@ -275,9 +351,7 @@ impl Split {
         let mut netloc = None;
         if let Some(after) = rest.strip_prefix("//") {
             let end = after.find(['/', '?', '#']).unwrap_or(after.len());
-            if after[..end].contains('[') != after[..end].contains(']') {
-                return Err("Invalid IPv6 URL".to_owned());
-            }
+            check_brackets(&after[..end])?;
             netloc = Some(after[..end].to_owned());
             rest = &after[end..];
         }
@@ -340,10 +414,10 @@ fn urljoin_314(base: &str, url: &str) -> Result<String, String> {
         u.scheme.clone_from(&b.scheme);
     }
     let scheme = u.scheme.as_deref().unwrap_or_default();
-    if u.scheme != b.scheme || (!scheme.is_empty() && !USES_RELATIVE.contains(&scheme)) {
+    if u.scheme != b.scheme || (!scheme.is_empty() && !uses(USES_RELATIVE, scheme)) {
         return Ok(url.to_owned());
     }
-    if scheme.is_empty() || USES_NETLOC.contains(&scheme) {
+    if scheme.is_empty() || uses(USES_NETLOC, scheme) {
         if u.netloc.as_deref().is_some_and(|netloc| !netloc.is_empty()) {
             return Ok(u.join());
         }
@@ -460,7 +534,12 @@ pub(crate) fn file_url_path(url: &str, python_minor: u32) -> Option<Vec<u8>> {
             return None;
         }
     }
-    // `url2pathname`.
+    // `url2pathname`; until Python 3.12 a plain `unquote`, whose UTF-8 decoding replaces
+    // what is not UTF-8.
+    if python_minor <= 11 {
+        let path = String::from_utf8_lossy(&unquote_bytes(&selector)).into_owned();
+        return Some(path.into_bytes());
+    }
     let selector = if selector.starts_with("///") {
         &selector[2..]
     } else if selector.starts_with("//localhost/") {
@@ -534,70 +613,160 @@ mod tests {
     /// What `urlopen` reads, checked against CPython 3.13 and 3.14 on macOS.
     #[test]
     fn file_urls_open_what_urllib_opens() {
-        let cases: [(&str, Option<&str>, Option<&str>); 14] = [
-            ("file:///d/b.json", Some("/d/b.json"), Some("/d/b.json")),
+        // What `urlopen` opens on Python 3.11 (as 3.10), 3.13 (as 3.12) and 3.14.
+        let cases: [(&str, [Option<&str>; 3]); 20] = [
+            (
+                "file:///d/b.json",
+                [Some("/d/b.json"), Some("/d/b.json"), Some("/d/b.json")],
+            ),
             (
                 "file:///d/b.json?x=1",
-                Some("/d/b.json?x=1"),
-                Some("/d/b.json"),
+                [
+                    Some("/d/b.json?x=1"),
+                    Some("/d/b.json?x=1"),
+                    Some("/d/b.json"),
+                ],
             ),
             (
                 "file:///d/q%3F.json",
-                Some("/d/q?.json"),
-                Some("/d/q?.json"),
+                [Some("/d/q?.json"), Some("/d/q?.json"), Some("/d/q?.json")],
             ),
             (
                 "file:///d/p%2541.json",
-                Some("/d/p%41.json"),
-                Some("/d/p%41.json"),
-            ),
-            (
-                "file:///d/semi;p.json",
-                Some("/d/semi;p.json"),
-                Some("/d/semi;p.json"),
+                [
+                    Some("/d/p%41.json"),
+                    Some("/d/p%41.json"),
+                    Some("/d/p%41.json"),
+                ],
             ),
             (
                 "file://localhost/d/b.json",
-                Some("/d/b.json"),
-                Some("/d/b.json"),
+                [Some("/d/b.json"), Some("/d/b.json"), Some("/d/b.json")],
             ),
             (
                 "file://LOCALHOST/d/b.json",
-                Some("/d/b.json"),
-                Some("/d/b.json"),
+                [Some("/d/b.json"), Some("/d/b.json"), Some("/d/b.json")],
             ),
             (
                 "file://127.0.0.1/d/b.json",
-                Some("/d/b.json"),
-                Some("/d/b.json"),
+                [Some("/d/b.json"), Some("/d/b.json"), Some("/d/b.json")],
             ),
-            ("file://otherhost/d/b.json", None, None),
-            ("file://localhost:80/d/b.json", None, None),
-            ("file:/d/b.json", Some("/d/b.json"), Some("/d/b.json")),
-            ("file:etc/passwd", Some("etc/passwd"), Some("etc/passwd")),
-            ("file:////d/b.json", Some("//d/b.json"), Some("//d/b.json")),
-            ("file:///d/b.json?", Some("/d/b.json?"), Some("/d/b.json")),
+            ("file://otherhost/d/b.json", [None, None, None]),
+            ("file://localhost:80/d/b.json", [None, None, None]),
+            (
+                "file:/d/b.json",
+                [Some("/d/b.json"), Some("/d/b.json"), Some("/d/b.json")],
+            ),
+            (
+                "file:etc/passwd",
+                [Some("etc/passwd"), Some("etc/passwd"), Some("etc/passwd")],
+            ),
+            (
+                "file:////d/b.json",
+                [Some("//d/b.json"), Some("//d/b.json"), Some("//d/b.json")],
+            ),
+            (
+                "file://///d/b.json",
+                [Some("///d/b.json"), Some("/d/b.json"), Some("///d/b.json")],
+            ),
+            (
+                "file:///d/b.json?",
+                [Some("/d/b.json?"), Some("/d/b.json?"), Some("/d/b.json")],
+            ),
+            (
+                "file:///d/%C3%A9.json",
+                [Some("/d/é.json"), Some("/d/é.json"), Some("/d/é.json")],
+            ),
+            (
+                "file:////localhost/d/b.json",
+                [
+                    Some("//localhost/d/b.json"),
+                    Some("/d/b.json"),
+                    Some("//localhost/d/b.json"),
+                ],
+            ),
+            (
+                "file://localhost//d/b.json",
+                [Some("//d/b.json"), Some("//d/b.json"), Some("//d/b.json")],
+            ),
+            (
+                "file://localhost///d/b.json",
+                [Some("///d/b.json"), Some("/d/b.json"), Some("///d/b.json")],
+            ),
+            (
+                "file:///d/%2Fx.json",
+                [Some("/d//x.json"), Some("/d//x.json"), Some("/d//x.json")],
+            ),
+            (
+                "file:///d/b.json#f",
+                [Some("/d/b.json"), Some("/d/b.json"), Some("/d/b.json")],
+            ),
         ];
-        for (url, py313, py314) in cases {
+        for (url, [py311, py313, py314]) in cases {
             let path =
                 |minor| file_url_path(url, minor).map(|bytes| String::from_utf8(bytes).unwrap());
+            assert_eq!(path(11).as_deref(), py311, "3.11: {url}");
+            assert_eq!(path(12).as_deref(), py313, "3.12: {url}");
             assert_eq!(path(13).as_deref(), py313, "3.13: {url}");
             assert_eq!(path(14).as_deref(), py314, "3.14: {url}");
         }
-        // Undecodable escapes stay the bytes they stand for.
+        // Undecodable escapes stay the bytes they stand for, from Python 3.12; before, each
+        // invalid sequence becomes U+FFFD.
+        for minor in [12, 13, 14] {
+            assert_eq!(
+                file_url_path("file:///d/%E9%FF.json", minor),
+                Some(b"/d/\xe9\xff.json".to_vec())
+            );
+        }
         assert_eq!(
-            file_url_path("file:///d/%E9.json", 13),
-            Some(b"/d/\xe9.json".to_vec())
+            file_url_path("file:///d/%E9%FF.json", 11),
+            Some("/d/\u{fffd}\u{fffd}.json".as_bytes().to_vec())
         );
     }
 
-    /// `[base, url, result]` triples computed by CPython (`scripts/urljoin_cases.py`);
-    /// a result of `null` means `urljoin` raised.
+    /// The fixtures of `scripts/urljoin_cases.py` for Python 3.10 to 3.14, by minor version.
+    const FIXTURES: [(u32, &str, &str); 5] = [
+        (
+            10,
+            include_str!("../tests/fixtures/urljoin-3.10.json"),
+            include_str!("../tests/fixtures/urldefrag-3.10.json"),
+        ),
+        (
+            11,
+            include_str!("../tests/fixtures/urljoin-3.11.json"),
+            include_str!("../tests/fixtures/urldefrag-3.11.json"),
+        ),
+        (
+            12,
+            include_str!("../tests/fixtures/urljoin-3.12.json"),
+            include_str!("../tests/fixtures/urldefrag-3.12.json"),
+        ),
+        (
+            13,
+            include_str!("../tests/fixtures/urljoin-3.13.json"),
+            include_str!("../tests/fixtures/urldefrag-3.13.json"),
+        ),
+        (
+            14,
+            include_str!("../tests/fixtures/urljoin-3.14.json"),
+            include_str!("../tests/fixtures/urldefrag-3.14.json"),
+        ),
+    ];
+
+    /// What CPython returned: the value, or `{"ValueError": message}`.
+    fn outcome<T: Into<Value>>(result: Result<T, String>) -> Value {
+        match result {
+            Ok(value) => value.into(),
+            Err(message) => serde_json::json!({ "ValueError": message }),
+        }
+    }
+
+    /// `[base, url, result]` triples computed by CPython.
     fn check_urljoin(fixture: &str) {
-        let cases: Vec<(String, String, Option<String>)> = serde_json::from_str(fixture).unwrap();
+        let cases: Vec<(String, String, Value)> = serde_json::from_str(fixture).unwrap();
         assert!(cases.len() > 1000);
         for (base, url, expected) in cases {
-            let actual = urljoin(&base, &url).ok();
+            let actual = outcome(urljoin(&base, &url));
             assert_eq!(actual, expected, "urljoin({base:?}, {url:?})");
         }
     }
@@ -606,27 +775,22 @@ mod tests {
         let cases: Vec<(String, Value)> = serde_json::from_str(fixture).unwrap();
         assert!(cases.len() > 100);
         for (url, expected) in cases {
-            let actual = urldefrag(&url)
-                .ok()
-                .map(|(u, f)| Value::Array(vec![Value::String(u), Value::String(f)]))
-                .unwrap_or(Value::Null);
+            let actual = outcome(urldefrag(&url).map(|(u, f)| vec![u, f]));
             assert_eq!(actual, expected, "urldefrag({url:?})");
         }
     }
 
     #[test]
     fn urljoin_matches_cpython() {
-        check_urljoin(include_str!("../tests/fixtures/urljoin.json"));
-        crate::context::with_python_minor(14, || {
-            check_urljoin(include_str!("../tests/fixtures/urljoin-3.14.json"));
-        });
+        for (minor, urljoin, _) in FIXTURES {
+            crate::context::with_python_minor(minor, || check_urljoin(urljoin));
+        }
     }
 
     #[test]
     fn urldefrag_matches_cpython() {
-        check_urldefrag(include_str!("../tests/fixtures/urldefrag.json"));
-        crate::context::with_python_minor(14, || {
-            check_urldefrag(include_str!("../tests/fixtures/urldefrag-3.14.json"));
-        });
+        for (minor, _, urldefrag) in FIXTURES {
+            crate::context::with_python_minor(minor, || check_urldefrag(urldefrag));
+        }
     }
 }
