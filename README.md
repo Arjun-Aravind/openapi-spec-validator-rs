@@ -149,7 +149,7 @@ repos:
         name: openapi-spec-validator-rs
         entry: openapi-spec-validator-rs
         language: python
-        additional_dependencies: [openapi-spec-validator-rs==0.2.3]
+        additional_dependencies: [openapi-spec-validator-rs==0.2.4]
         files: .*(openapi|swagger).*\.(json|yaml|yml)$
 ```
 
