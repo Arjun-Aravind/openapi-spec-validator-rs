@@ -62,7 +62,15 @@ class SpecValidator:
             # A jsonschema-path `SchemaPath`: like upstream, resolve references
             # against its own base URI.
             base_uri = schema.base_uri
-            schema = read_value()
+            root = getattr(getattr(schema, "accessor", None), "node", None)
+            if not getattr(schema, "parts", ()) and root is not None:
+                # Its value follows a `$ref` at the root, which upstream checks against
+                # the meta-schema, while its walk resolves references from the root
+                # document itself.
+                schema = root
+                self._follow_root_ref = True
+            else:
+                schema = read_value()
         self.schema = schema
         self.base_uri = base_uri
 

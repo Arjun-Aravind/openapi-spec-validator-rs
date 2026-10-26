@@ -430,3 +430,56 @@ def test_settings_schemas_and_finders_modules(monkeypatch: pytest.MonkeyPatch) -
             up.schema_validator_backend,
         )
         assert [str(w.message) for w in ours] == [str(w.message) for w in theirs]
+
+
+def test_schema_path_with_a_root_ref(tmp_path: Path) -> None:
+    # A jsonschema-path `SchemaPath` follows a `$ref` at the root when read, while the
+    # walk resolves references from the root document and from the files they lead to.
+    from jsonschema_path import SchemaPath
+
+    info = {"title": "t", "version": "1"}
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "other.json").write_text(
+        '{"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, '
+        '"paths": {"/a": {"get": {"responses": {"200": {"$ref": "common.json#/R"}}}}}}'
+    )
+    (tmp_path / "sub" / "common.json").write_text('{"R": {"description": "d"}}')
+    responses = {"200": {"$ref": "#/components/responses/R"}}
+    documents = {
+        "dangling": {
+            "openapi": "3.0.3",
+            "info": info,
+            "paths": {},
+            "$ref": "#/x",
+            "x": {
+                "openapi": "3.0.3",
+                "info": info,
+                "paths": {"/a": {"get": {"responses": responses}}},
+                "components": {"responses": {"R": {"description": "d"}}},
+            },
+        },
+        "other_directory": {"openapi": "3.0.3", "info": info, "paths": {}, "$ref": "sub/other.json"},
+        "invalid_target": {"openapi": "3.0.3", "info": info, "paths": {}, "$ref": "#/x", "x": {}},
+    }
+    base_uri = (tmp_path / "root.json").as_uri()
+
+    def results(lib: Any, spec: Any) -> tuple[str, ...]:
+        def run(call: Callable[[], Any]) -> str:
+            try:
+                return repr(call())
+            except Exception as error:  # noqa: BLE001
+                name = type(error).__name__
+                # Non-validation exceptions are ValidationAbortedError here.
+                if name not in ("OpenAPIValidationError", "ValidationAbortedError"):
+                    name = "ValidationAbortedError"
+                return f"{name}: {str(error).splitlines()[0]}"
+
+        path = SchemaPath.from_dict(spec, base_uri=base_uri)
+        cls = lib.OpenAPIV30SpecValidator
+        return (
+            run(lambda: cls(path).validate()),
+            run(lambda: [str(e).splitlines()[0] for e in cls(path).iter_errors()]),
+        )
+
+    for name, spec in documents.items():
+        assert results(osv, spec) == results(upstream, spec), name

@@ -57,7 +57,7 @@ mod pyregex_tests;
 
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 
@@ -160,13 +160,15 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     validate_document(spec, options, options.errors == ErrorMode::First)
 }
 
-/// [`validate`], checking `spec` itself against the meta-schema even when its root is a
-/// `$ref`, as upstream's validator classes do when given a plain mapping.
+/// [`validate`], checking against the meta-schema what a `$ref` at the root of `spec`
+/// points to (`follow_root_ref`) or `spec` itself, whichever the error mode: upstream's
+/// validator classes check a plain mapping as given, and what a jsonschema-path
+/// `SchemaPath` reads (following that reference) otherwise.
 ///
 /// Not a supported API: used by the Python bindings.
 #[doc(hidden)]
-pub fn validate_as_given(spec: &Value, options: &Options) -> Outcome {
-    validate_document(spec, options, false)
+pub fn validate_root_ref(spec: &Value, options: &Options, follow_root_ref: bool) -> Outcome {
+    validate_document(spec, options, follow_root_ref)
 }
 
 fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> Outcome {
@@ -184,13 +186,18 @@ fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> 
     // Upstream's `validate()` reads the document through a jsonschema-path `SchemaPath`,
     // which follows a `$ref` at its root, ignoring the keys beside it: the meta-schema
     // check sees what the reference points to (the walk resolves it as it goes).
-    let root_documents;
+    let resolved_root;
+    // What was read to resolve it, which the walk goes on with: upstream reads every
+    // document once.
+    let documents = std::sync::Mutex::new(None);
     let checked = if follow_root_ref && document::as_ref(spec).is_some() {
-        root_documents = Documents::new(spec, base_uri, retriever);
-        match root_documents.resolve(root_documents.root()) {
-            Ok(node) => node.value,
+        let root_documents = Documents::new(spec, base_uri, retriever);
+        resolved_root = match root_documents.resolve(root_documents.root()) {
+            Ok(node) => node.value.clone(),
             Err(crash) => return Outcome::Error(crash.0),
-        }
+        };
+        *documents.lock().unwrap_or_else(PoisonError::into_inner) = Some(root_documents);
+        &resolved_root
     } else {
         spec
     };
@@ -234,7 +241,7 @@ fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> 
             let document = spawn_large(scope, || document_errors(checked, version, first_only));
             let walk = on_large_stack(scope, || {
                 walk(
-                    spec, version, first_only, base_uri, retriever, stack, nesting,
+                    spec, version, first_only, base_uri, retriever, stack, nesting, &documents,
                 )
             });
             (document.join(), walk.join())
@@ -248,6 +255,7 @@ fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> 
                         errors,
                         walk(
                             spec, version, first_only, base_uri, retriever, stack, nesting,
+                            &documents,
                         ),
                     )
                 }
@@ -537,16 +545,22 @@ fn errors_validator(version: SpecVersion) -> &'static jsonschema::Validator {
 }
 
 /// Upstream's keyword walk: its errors, or the message of the exception it would raise.
-fn walk(
-    spec: &Value,
+#[allow(clippy::too_many_arguments)]
+fn walk<'a>(
+    spec: &'a Value,
     version: SpecVersion,
     first_only: bool,
     base_uri: &str,
-    retriever: Option<&dyn Retrieve>,
+    retriever: Option<&'a dyn Retrieve>,
     stack: PythonStack,
     nesting: usize,
+    documents: &Mutex<Option<Documents<'a>>>,
 ) -> Result<Vec<ValidationError>, String> {
-    let docs = Documents::new(spec, base_uri, retriever);
+    let docs = documents
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .unwrap_or_else(|| Documents::new(spec, base_uri, retriever));
     let mut walker = Walker::new(&docs, version, first_only, stack, nesting);
     match walker.root(docs.root()) {
         Err(Stop::Crash(message)) => Err(message),
