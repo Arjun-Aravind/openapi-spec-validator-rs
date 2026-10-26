@@ -20,7 +20,11 @@ pub struct Cancelled;
 pub(crate) struct Context {
     cancel: Option<Arc<AtomicBool>>,
     stack: Option<PythonStack>,
+    python_minor: Option<u32>,
 }
+
+/// The Python 3 minor version whose behaviour is followed when nothing else is asked for.
+pub const DEFAULT_PYTHON_MINOR: u32 = 13;
 
 /// Where upstream's validation would sit on the Python stack: the depth of
 /// `SpecValidator.iter_errors` (the outermost frame counts 1) and the recursion limit.
@@ -51,6 +55,25 @@ pub fn with_python_stack<T>(stack: PythonStack, f: impl FnOnce() -> T) -> T {
     let mut context = Context::current();
     context.stack = Some(stack);
     context.install(f)
+}
+
+/// Runs `f` following the standard library of Python 3.`minor` where it changed between
+/// versions (by default 3.13): with 3.14, `file:` URLs lose their query, `\z` is a valid
+/// regex escape, and several messages are worded differently.
+///
+/// Not a supported API: used by the command line and the Python bindings.
+#[doc(hidden)]
+pub fn with_python_minor<T>(minor: u32, f: impl FnOnce() -> T) -> T {
+    let mut context = Context::current();
+    context.python_minor = Some(minor);
+    context.install(f)
+}
+
+/// The Python 3 minor version the current validation follows.
+pub(crate) fn python_minor() -> u32 {
+    CURRENT
+        .with(|current| current.borrow().python_minor)
+        .unwrap_or(DEFAULT_PYTHON_MINOR)
 }
 
 /// The Python stack position of the current validation, if the caller gave one.

@@ -234,11 +234,192 @@ pub(crate) fn scheme(url: &str) -> String {
     urlsplit(url, "").map(|p| p.scheme).unwrap_or_default()
 }
 
+/// The local file `urlopen` reads for the `file:` URL `url`, as POSIX CPython's
+/// `FileHandler` finds it, as bytes: `None` when it refuses the URL (a host that is not
+/// this machine). Python 3.13 and earlier read the query as part of the file name; 3.14
+/// drops it. A path without `//` (`file:etc/x`, what `urljoin` makes of more `..`
+/// segments than the base has directories) is relative to the current directory.
+///
+/// The host check is an approximation: Python compares the addresses the host name
+/// resolves to with this machine's; here only `localhost` and `127.0.0.1` count.
+pub(crate) fn file_url_path(url: &str, python_minor: u32) -> Option<Vec<u8>> {
+    // `Request` strips the URL and a `<URL:...>` wrapping.
+    let url = url.trim();
+    let url = url
+        .strip_prefix('<')
+        .and_then(|inner| inner.strip_suffix('>'))
+        .map_or(url, str::trim);
+    let url = url.strip_prefix("URL:").map_or(url, str::trim);
+    if python_minor >= 14 {
+        // `url2pathname(full_url, require_scheme=True, resolve_host=True)`.
+        let parsed = urlsplit(url, "").ok()?;
+        if parsed.scheme != "file" || !is_local_host(&parsed.netloc) {
+            return None;
+        }
+        return Some(unquote_bytes(&parsed.path));
+    }
+    // `Request._parse`: the fragment is gone, then `_splittype` and `_splithost`.
+    let url = url.rsplit_once('#').map_or(url, |(url, _)| url);
+    let (_, rest) = url.split_once(':')?;
+    let (host, selector) = match rest.strip_prefix("//") {
+        Some(after) => {
+            let end = after.find(['/', '#', '?']).unwrap_or(after.len());
+            let path = &after[end..];
+            let path = if path.is_empty() || path.starts_with('/') {
+                path.to_owned()
+            } else {
+                format!("/{path}")
+            };
+            (Some(unquote(&after[..end])), path)
+        }
+        None => (None, rest.to_owned()),
+    };
+    if let Some(host) = host.as_deref().filter(|host| !host.is_empty()) {
+        // `file_open` passes such a selector on to nothing when the host is remote.
+        if selector.starts_with("//") && !selector[2..].starts_with('/') && host != "localhost" {
+            return None;
+        }
+        // `open_local_file`: `_splitport`, then a host without a port must be this one.
+        let (name, port) = match host.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => {
+                (name, (!port.is_empty()).then_some(port))
+            }
+            _ => (host, None),
+        };
+        if !name.is_empty() && (port.is_some() || !is_local_host(name)) {
+            return None;
+        }
+    }
+    // `url2pathname`.
+    let selector = if selector.starts_with("///") {
+        &selector[2..]
+    } else if selector.starts_with("//localhost/") {
+        &selector[11..]
+    } else {
+        selector.as_str()
+    };
+    Some(unquote_bytes(selector))
+}
+
+fn is_local_host(host: &str) -> bool {
+    host.is_empty() || host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1"
+}
+
+/// The byte a `%XX` escape at the start of `text` stands for.
+fn escaped_byte(text: &[u8]) -> Option<u8> {
+    match text {
+        [b'%', high, low, ..] => {
+            let digit = |b: &u8| char::from(*b).to_digit(16);
+            Some(u8::try_from(digit(high)? * 16 + digit(low)?).ok()?)
+        }
+        _ => None,
+    }
+}
+
+/// `unquote(text, errors='surrogateescape')` encoded back to bytes the way `os.fsencode`
+/// does: every valid `%XX` becomes its byte.
+fn unquote_bytes(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(byte) = escaped_byte(&bytes[i..]) {
+            decoded.push(byte);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    decoded
+}
+
+/// `unquote(text)`: runs of `%XX` decoded as UTF-8, invalid sequences replaced.
+fn unquote(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut run = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(byte) = escaped_byte(&bytes[i..]) {
+            run.push(byte);
+            i += 3;
+        } else {
+            out.push_str(&String::from_utf8_lossy(&std::mem::take(&mut run)));
+            let c = text[i..].chars().next().unwrap_or_default();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&run));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
 
     use super::*;
+
+    /// What `urlopen` reads, checked against CPython 3.13 and 3.14 on macOS.
+    #[test]
+    fn file_urls_open_what_urllib_opens() {
+        let cases: [(&str, Option<&str>, Option<&str>); 14] = [
+            ("file:///d/b.json", Some("/d/b.json"), Some("/d/b.json")),
+            (
+                "file:///d/b.json?x=1",
+                Some("/d/b.json?x=1"),
+                Some("/d/b.json"),
+            ),
+            (
+                "file:///d/q%3F.json",
+                Some("/d/q?.json"),
+                Some("/d/q?.json"),
+            ),
+            (
+                "file:///d/p%2541.json",
+                Some("/d/p%41.json"),
+                Some("/d/p%41.json"),
+            ),
+            (
+                "file:///d/semi;p.json",
+                Some("/d/semi;p.json"),
+                Some("/d/semi;p.json"),
+            ),
+            (
+                "file://localhost/d/b.json",
+                Some("/d/b.json"),
+                Some("/d/b.json"),
+            ),
+            (
+                "file://LOCALHOST/d/b.json",
+                Some("/d/b.json"),
+                Some("/d/b.json"),
+            ),
+            (
+                "file://127.0.0.1/d/b.json",
+                Some("/d/b.json"),
+                Some("/d/b.json"),
+            ),
+            ("file://otherhost/d/b.json", None, None),
+            ("file://localhost:80/d/b.json", None, None),
+            ("file:/d/b.json", Some("/d/b.json"), Some("/d/b.json")),
+            ("file:etc/passwd", Some("etc/passwd"), Some("etc/passwd")),
+            ("file:////d/b.json", Some("//d/b.json"), Some("//d/b.json")),
+            ("file:///d/b.json?", Some("/d/b.json?"), Some("/d/b.json")),
+        ];
+        for (url, py313, py314) in cases {
+            let path =
+                |minor| file_url_path(url, minor).map(|bytes| String::from_utf8(bytes).unwrap());
+            assert_eq!(path(13).as_deref(), py313, "3.13: {url}");
+            assert_eq!(path(14).as_deref(), py314, "3.14: {url}");
+        }
+        // Undecodable escapes stay the bytes they stand for.
+        assert_eq!(
+            file_url_path("file:///d/%E9.json", 13),
+            Some(b"/d/\xe9.json".to_vec())
+        );
+    }
 
     /// `[base, url, result]` triples computed by CPython (`scripts/urljoin_cases.py`);
     /// a result of `null` means `urljoin` raised.

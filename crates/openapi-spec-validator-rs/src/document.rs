@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
-use url::Url;
 
 use crate::loader;
 use crate::pyobj;
@@ -220,14 +219,7 @@ impl<'a> Documents<'a> {
     fn retrieve(&self, uri: &str) -> Result<Value, String> {
         match pyurl::scheme(uri).as_str() {
             "file" => {
-                let url = Url::parse(uri).map_err(|error| error.to_string())?;
-                // urllib opens the URL's whole selector, query included, as the file name.
-                if url.query().is_some() {
-                    return Err(format!("not a file path: {uri}"));
-                }
-                let path = url
-                    .to_file_path()
-                    .map_err(|()| format!("not a file path: {uri}"))?;
+                let path = local_file(uri).ok_or_else(|| format!("not a local file: {uri}"))?;
                 let bytes = crate::read_file(&path).map_err(|error| error.to_string())?;
                 // Upstream reads files through `urlopen`, which is the stream name
                 // PyYAML reports.
@@ -494,6 +486,26 @@ impl<T> Arena<T> {
 
 fn strip_fragment(uri: &str) -> &str {
     uri.split_once('#').map_or(uri, |(base, _)| base)
+}
+
+/// The file `urlopen` reads for the `file:` URL `uri` (see [`pyurl::file_url_path`]).
+#[cfg(unix)]
+fn local_file(uri: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = pyurl::file_url_path(uri, crate::context::python_minor())?;
+    Some(std::ffi::OsString::from_vec(bytes).into())
+}
+
+/// The file for the `file:` URL `uri`. Python's Windows conversion (`nturl2path`) is not
+/// reproduced: the URL is read as a standard file URL, and a query is never part of a
+/// file name.
+#[cfg(not(unix))]
+fn local_file(uri: &str) -> Option<std::path::PathBuf> {
+    let url = url::Url::parse(uri).ok()?;
+    if url.query().is_some() && crate::context::python_minor() < 14 {
+        return None;
+    }
+    url.to_file_path().ok()
 }
 
 #[cfg(test)]
