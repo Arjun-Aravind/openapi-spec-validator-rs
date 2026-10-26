@@ -21,7 +21,26 @@ pub(crate) struct Context {
     cancel: Option<Arc<AtomicBool>>,
     stack: Option<PythonStack>,
     python_minor: Option<u32>,
+    /// How deeply documents may nest, when validation runs on a stack it did not size.
+    nesting_limit: Option<usize>,
 }
+
+/// The unwind payload when validation runs on a thread it did not start (none could be
+/// started) and the document nests too deeply for that thread's stack.
+#[derive(Debug)]
+pub struct StackTooSmall;
+
+/// What validation reports for [`StackTooSmall`].
+pub const STACK_TOO_SMALL: &str = "cannot start the validation thread, and the document \
+                                   nests too deeply for the calling thread's stack";
+
+/// Stack used per level of nesting by the deepest pass, with a margin (the deepest
+/// documents the reader accepts, about 10,000 levels, take 8 MiB in release builds), and
+/// what is left free besides.
+const STACK_PER_LEVEL: usize = 2 << 10;
+const STACK_RESERVE: usize = 512 << 10;
+/// The stack assumed where the platform does not tell (Windows' default for threads).
+const UNKNOWN_STACK: usize = 1 << 20;
 
 /// The Python 3 minor version whose behaviour is followed when nothing else is asked for.
 pub const DEFAULT_PYTHON_MINOR: u32 = 13;
@@ -137,6 +156,63 @@ impl ContextHandle {
 
     pub fn install<T>(&self, f: impl FnOnce() -> T) -> T {
         self.0.clone().install(f)
+    }
+}
+
+/// Runs `f` on the current thread, letting documents nest only as deeply as what is left
+/// of its stack allows: deeper nesting unwinds with [`StackTooSmall`] at the next check.
+///
+/// Not a supported API: used by the Python bindings when no thread can be started.
+#[doc(hidden)]
+pub fn within_this_stack<T>(f: impl FnOnce() -> T) -> T {
+    let remaining = crate::stack_size::remaining().unwrap_or(UNKNOWN_STACK);
+    let limit = remaining.saturating_sub(STACK_RESERVE) / STACK_PER_LEVEL;
+    let mut context = Context::current();
+    context.nesting_limit = Some(context.nesting_limit.map_or(limit, |l| l.min(limit)));
+    context.install(f)
+}
+
+/// How deeply documents may nest on the current thread, if it limits them.
+///
+/// Not a supported API: used by the Python bindings.
+#[doc(hidden)]
+pub fn nesting_limit() -> Option<usize> {
+    CURRENT.with(|current| current.borrow().nesting_limit)
+}
+
+/// Stops validation with [`StackTooSmall`] when `depth` exceeds [`nesting_limit`].
+pub(crate) fn check_nesting(depth: usize) {
+    if nesting_limit().is_some_and(|limit| depth > limit) {
+        std::panic::resume_unwind(Box::new(StackTooSmall));
+    }
+}
+
+/// [`check_nesting`] for a whole document, without recursion.
+pub(crate) fn check_value_nesting(value: &serde_json::Value) {
+    use serde_json::Value;
+    let Some(limit) = nesting_limit() else {
+        return;
+    };
+    let mut pending = vec![(value, 1)];
+    while let Some((value, depth)) = pending.pop() {
+        let children: Box<dyn Iterator<Item = &Value>> = match value {
+            Value::Array(items) => Box::new(items.iter()),
+            Value::Object(map) => Box::new(map.values()),
+            _ => continue,
+        };
+        if depth > limit {
+            std::panic::resume_unwind(Box::new(StackTooSmall));
+        }
+        pending.extend(children.map(|child| (child, depth + 1)));
+    }
+}
+
+/// Runs `f`, turning a [`StackTooSmall`] unwind into `too_deep()`.
+pub(crate) fn catch_stack_too_small<T>(f: impl FnOnce() -> T, too_deep: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(payload) if payload.is::<StackTooSmall>() => too_deep(),
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 

@@ -853,6 +853,7 @@ dependencies = [
  "base64",
  "fancy-regex",
  "jsonschema",
+ "libc",
  "percent-encoding",
  "referencing",
  "serde_json",

@@ -47,6 +47,7 @@ pub mod pyrepr;
 mod pyurl;
 mod retrieve;
 mod schema_path;
+mod stack_size;
 mod values;
 pub mod version;
 
@@ -62,8 +63,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::Value;
 
 pub use crate::context::{
-    Cancelled, ContextHandle, DEFAULT_PYTHON_MINOR, PythonStack, check as check_cancelled,
-    python_minor, run_cancellable, with_python_minor, with_python_stack,
+    Cancelled, ContextHandle, DEFAULT_PYTHON_MINOR, PythonStack, STACK_TOO_SMALL, StackTooSmall,
+    check as check_cancelled, nesting_limit, python_minor, run_cancellable, with_python_minor,
+    with_python_stack, within_this_stack,
 };
 use crate::context::{Context, python_stack};
 use crate::document::Documents;
@@ -157,7 +159,7 @@ pub fn meta_schema_text(version: SpecVersion) -> &'static str {
 pub fn validate(spec: &Value, options: &Options) -> Outcome {
     // Upstream's `validate()` follows a `$ref` at the root; its `iter_errors()`, which
     // collects every error (and which its command line uses for that), does not.
-    validate_document(spec, options, options.errors == ErrorMode::First)
+    validate_root_ref(spec, options, options.errors == ErrorMode::First)
 }
 
 /// [`validate`], checking against the meta-schema what a `$ref` at the root of `spec`
@@ -168,7 +170,10 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
 /// Not a supported API: used by the Python bindings.
 #[doc(hidden)]
 pub fn validate_root_ref(spec: &Value, options: &Options, follow_root_ref: bool) -> Outcome {
-    validate_document(spec, options, follow_root_ref)
+    context::catch_stack_too_small(
+        || validate_document(spec, options, follow_root_ref),
+        || Outcome::Error(STACK_TOO_SMALL.to_owned()),
+    )
 }
 
 fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> Outcome {
@@ -212,6 +217,8 @@ fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> 
     };
     let (recursion, nesting) = std::thread::scope(|scope| {
         on_large_stack(scope, || {
+            // On a stack this library did not size, what nests too deeply stops here.
+            context::check_value_nesting(spec);
             let nesting = frames::nesting(spec);
             let recursion = if std::ptr::eq(checked, spec) {
                 document_recursion(spec, version, first_only, budget, nesting)
@@ -444,7 +451,8 @@ fn spawn_large<'scope, T: Send + 'scope>(
     };
     match spawned {
         Ok(handle) => Running::Spawned(handle),
-        Err(_) => Running::Done(work()),
+        // No thread can be started: as deeply as this thread's stack allows.
+        Err(_) => Running::Done(context::within_this_stack(|| work())),
     }
 }
 
@@ -573,7 +581,14 @@ fn walk<'a>(
 /// Read and parse failures are returned as [`LoadError`], whose message matches what
 /// upstream prints for them. Like [`validate`], this runs on a thread with a large stack.
 pub fn validate_path(path: &Path, options: &Options) -> Result<Outcome, LoadError> {
-    std::thread::scope(|scope| on_large_stack(scope, || read_and_validate(path, options)).join())
+    context::catch_stack_too_small(
+        || {
+            std::thread::scope(|scope| {
+                on_large_stack(scope, || read_and_validate(path, options)).join()
+            })
+        },
+        || Ok(Outcome::Error(STACK_TOO_SMALL.to_owned())),
+    )
 }
 
 fn read_and_validate(path: &Path, options: &Options) -> Result<Outcome, LoadError> {

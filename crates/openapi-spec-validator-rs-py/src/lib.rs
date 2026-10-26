@@ -11,10 +11,10 @@ mod stack;
 use std::sync::Arc;
 
 use openapi_spec_validator_rs::{
-    DetectError, ErrorMode, LoadError, Options, Outcome, PythonStack, Retrieve, SpecVersion,
-    ValidationError, detect_version, with_python_stack,
+    DetectError, ErrorMode, LoadError, Options, Outcome, PythonStack, Retrieve, STACK_TOO_SMALL,
+    SpecVersion, ValidationError, detect_version, with_python_stack,
 };
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyType;
@@ -115,6 +115,10 @@ fn into_errors(
                 .map(|error| CoreError::new(error, Arc::clone(&objects)))
                 .collect())
         }
+        // No thread could be started and the document is too deep for this one.
+        Outcome::Error(message) if message == STACK_TOO_SMALL => {
+            Err(PyRuntimeError::new_err(message))
+        }
         Outcome::Error(message) => Err(objects
             .raised_for(py, &message)
             .unwrap_or_else(|| exception(py, "ValidationAbortedError", (message,)))),
@@ -157,7 +161,7 @@ fn validate(
         retriever.as_ref(),
     );
     let spec = spec.clone().unbind();
-    let (outcome, objects) = stack::run(py, move || {
+    let (outcome, objects) = stack::run(py, retriever.as_deref(), move || {
         let (value, objects) = stack::attach(|py| to_value(spec.bind(py)))?;
         let outcome = with_python_stack(stack, || {
             openapi_spec_validator_rs::validate_root_ref(&value, &options, follow_root_ref)
@@ -195,7 +199,7 @@ fn validate_bytes(
     let version = version.map(parse_version).transpose()?;
     let retriever = self::retriever(retriever);
     let worker_retriever = retriever.clone();
-    let result = stack::run(py, move || {
+    let result = stack::run(py, retriever.as_deref(), move || {
         Ok(with_python_stack(stack, || {
             load_and_validate(
                 &data,
@@ -210,6 +214,9 @@ fn validate_bytes(
     check_interrupt(retriever.as_ref())?;
     match result {
         Ok(outcome) => into_errors(py, outcome, PythonObjects::default()),
+        Err(BytesFailure::Load(error)) if error.message == STACK_TOO_SMALL => {
+            Err(PyRuntimeError::new_err(error.message))
+        }
         Err(BytesFailure::Load(error)) => Err(exception(py, "SpecReadError", (error.message,))),
         // Upstream raises `ValidatorDetectError()` without a message.
         Err(BytesFailure::Detect(DetectError::NotFound)) => {
@@ -245,7 +252,7 @@ fn load<'py>(
     data: PyBackedBytes,
     stream_name: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let loaded = stack::run(py, move || {
+    let loaded = stack::run(py, None, move || {
         match openapi_spec_validator_rs::load(&data, &stream_name) {
             Ok(spec) => stack::attach(|py| {
                 Ok(Ok(to_python(py, &spec, &PythonObjects::default())?.unbind()))
@@ -255,6 +262,9 @@ fn load<'py>(
     })?;
     match loaded {
         Ok(spec) => Ok(spec.into_bound(py)),
+        Err(error) if error.message == STACK_TOO_SMALL => {
+            Err(PyRuntimeError::new_err(error.message))
+        }
         Err(error) => Err(exception(py, "SpecReadError", (error.message,))),
     }
 }
@@ -279,7 +289,7 @@ fn cli_main(
 ) -> PyResult<(i32, String, String, bool)> {
     let retriever = self::retriever(retriever);
     let worker_retriever = retriever.clone();
-    let result = stack::run(py, move || {
+    let result = stack::run(py, retriever.as_deref(), move || {
         let retriever = worker_retriever;
         let argv =
             std::iter::once("openapi-spec-validator-rs").chain(args.iter().map(String::as_str));

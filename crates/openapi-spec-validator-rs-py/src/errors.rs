@@ -49,7 +49,7 @@ impl CoreError {
         let root = Arc::clone(&self.root);
         let context_path = self.context_path.clone();
         let objects = Arc::clone(&self.objects);
-        let object = stack::run(py, move || {
+        let object = stack::run(py, None, move || {
             let details = resolve(&root, &context_path)
                 .schema_error
                 .as_deref()
@@ -148,7 +148,9 @@ impl CoreError {
         let root = Arc::clone(&self.root);
         let context_path = self.context_path.clone();
         // Rendering pretty-prints the schema and instance, which can be large and deep.
-        let text = stack::run(py, move || Ok(resolve(&root, &context_path).to_string()))?;
+        let text = stack::run(py, None, move || {
+            Ok(resolve(&root, &context_path).to_string())
+        })?;
         // Rendering asks for the `repr()` of what it prints, which may have raised.
         match self.objects.raised_for(py, &text) {
             Some(raised) => Err(raised),

@@ -186,9 +186,14 @@ struct Failure {
 enum FailureKind {
     Python(PyErr),
     UnsupportedType(String),
-    NonStringKey { type_name: String, repr: String },
+    NonStringKey {
+        type_name: String,
+        repr: String,
+    },
     Circular,
     TooDeep,
+    /// Deeper than the stack of the thread the conversion had to run on allows.
+    StackTooSmall,
 }
 
 impl Failure {
@@ -223,6 +228,9 @@ impl Failure {
                 "maximum recursion depth exceeded: the spec nests more than {MAX_DEPTH} \
                  containers"
             )),
+            FailureKind::StackTooSmall => {
+                PyRuntimeError::new_err(openapi_spec_validator_rs::STACK_TOO_SMALL)
+            }
         }
     }
 }
@@ -380,6 +388,9 @@ impl Converter {
     fn enter(&mut self, obj: &Bound<'_, PyAny>, depth: usize) -> Result<usize, Failure> {
         if depth >= MAX_DEPTH {
             return Err(Failure::new(FailureKind::TooDeep));
+        }
+        if openapi_spec_validator_rs::nesting_limit().is_some_and(|limit| depth >= limit) {
+            return Err(Failure::new(FailureKind::StackTooSmall));
         }
         let id = obj.as_ptr() as usize;
         if !self.active.insert(id) {

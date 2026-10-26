@@ -70,7 +70,16 @@ pub fn load(bytes: &[u8], stream_name: &str) -> Result<Value, LoadError> {
     if let Some(value) = fast_json::try_load(bytes) {
         return Ok(value);
     }
-    load_yaml(libyaml::Source::Bytes(bytes), stream_name, FILE_DEPTH_LIMIT)
+    stack_guarded(|| load_yaml(libyaml::Source::Bytes(bytes), stream_name, FILE_DEPTH_LIMIT))
+}
+
+/// Runs a load, reporting [`crate::context::StackTooSmall`] as a read error.
+fn stack_guarded(load: impl FnOnce() -> Result<Value, LoadError>) -> Result<Value, LoadError> {
+    crate::context::catch_stack_too_small(load, || {
+        Err(LoadError {
+            message: crate::context::STACK_TOO_SMALL.to_owned(),
+        })
+    })
 }
 
 /// Parse a document read from a text stream (upstream's stdin path: `sys.stdin`, normally
@@ -83,7 +92,7 @@ pub fn load_text(bytes: &[u8], stream_name: &str, errors: TextErrors) -> Result<
         return Ok(value);
     }
     let feed = text_input::TextFeed::new(bytes, errors);
-    load_yaml(libyaml::Source::Text(feed), stream_name, STDIN_DEPTH_LIMIT)
+    stack_guarded(|| load_yaml(libyaml::Source::Text(feed), stream_name, STDIN_DEPTH_LIMIT))
 }
 
 fn load_yaml(

@@ -138,6 +138,8 @@ fn compose_node_tree(
                     return Err(RECURSION.to_owned());
                 }
                 depth += 1;
+                // On a stack this library did not size, nesting stops sooner.
+                crate::context::check_nesting(depth);
             }
         }
         let finished = match event {
