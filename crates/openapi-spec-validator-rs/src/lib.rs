@@ -183,7 +183,8 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     // are combined in upstream's order.
     let (document_errors, walk) = std::thread::scope(|scope| {
         if spec_is_large(spec) {
-            let document = on_large_stack(scope, || document_errors(spec, version));
+            // A thread of its own even on a large-stack thread: the point is concurrency.
+            let document = spawn_large(scope, || document_errors(spec, version));
             let walk = on_large_stack(scope, || {
                 walk(
                     spec, version, first_only, base_uri, retriever, stack, nesting,
@@ -307,6 +308,35 @@ pub fn predicted_frames(spec: &Value, version: SpecVersion, at: Option<&str>) ->
 /// loader allows (pages are only committed as they are used).
 const STACK_SIZE: usize = 256 << 20;
 
+/// The stack size [`on_large_stack_thread`] expects of its caller's thread.
+///
+/// Not a supported API: used by the command line and the Python bindings.
+#[doc(hidden)]
+pub const LARGE_STACK_SIZE: usize = STACK_SIZE;
+
+thread_local! {
+    /// Whether the current thread's stack is at least [`STACK_SIZE`].
+    static LARGE_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with the calling thread treated as one of the library's large-stack threads,
+/// so that validation runs on it instead of starting another: the caller promises a stack
+/// of at least [`LARGE_STACK_SIZE`].
+///
+/// Not a supported API: used by the command line and the Python bindings, whose worker
+/// threads are started that large.
+#[doc(hidden)]
+pub fn on_large_stack_thread<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LARGE_STACK.set(self.0);
+        }
+    }
+    let _restore = Restore(LARGE_STACK.replace(true));
+    f()
+}
+
 /// Work running on a large-stack thread, or already done on the current thread when no
 /// thread could be spawned.
 enum Running<'scope, T> {
@@ -325,7 +355,21 @@ impl<T> Running<'_, T> {
     }
 }
 
+/// Runs `work` where its recursion fits: on the current thread if it is a large-stack
+/// thread already, else on a new one.
 fn on_large_stack<'scope, T: Send + 'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    work: impl Fn() -> T + Send + Sync + 'scope,
+) -> Running<'scope, T> {
+    if LARGE_STACK.get() {
+        return Running::Done(work());
+    }
+    spawn_large(scope, work)
+}
+
+/// Starts `work` on a new large-stack thread, or runs it on the current thread when no
+/// thread can be started.
+fn spawn_large<'scope, T: Send + 'scope>(
     scope: &'scope std::thread::Scope<'scope, '_>,
     work: impl Fn() -> T + Send + Sync + 'scope,
 ) -> Running<'scope, T> {
@@ -336,7 +380,9 @@ fn on_large_stack<'scope, T: Send + 'scope>(
         let context = Context::current();
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
-            .spawn_scoped(scope, move || context.install(|| work()))
+            .spawn_scoped(scope, move || {
+                context.install(|| on_large_stack_thread(|| work()))
+            })
     };
     match spawned {
         Ok(handle) => Running::Spawned(handle),

@@ -13,12 +13,13 @@ use std::sync::{Arc, Mutex};
 use clap::{Parser, ValueEnum};
 use openapi_spec_validator_rs::{
     ContextHandle, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, TextErrors,
-    ValidationError, best_match, load_text, read_text_until_unreadable, validate, validate_path,
+    ValidationError, best_match, load_text, on_large_stack_thread, read_text_until_unreadable,
+    validate, validate_path,
 };
 use rayon::prelude::*;
 
 /// Stack size of the validation threads (address space only; pages are committed on use).
-const WORKER_STACK_SIZE: usize = 256 << 20;
+const WORKER_STACK_SIZE: usize = openapi_spec_validator_rs::LARGE_STACK_SIZE;
 
 /// Validate OpenAPI / Swagger specification files.
 #[derive(Debug, Parser)]
@@ -139,7 +140,12 @@ fn execute(
             pool.install(|| {
                 args.files
                     .par_iter()
-                    .map(|file| context.install(|| validate_file(file, &options, stdin)))
+                    .map(|file| {
+                        // The pool's threads are as large as the library's own.
+                        context.install(|| {
+                            on_large_stack_thread(|| validate_file(file, &options, stdin))
+                        })
+                    })
                     .collect()
             })
         }
