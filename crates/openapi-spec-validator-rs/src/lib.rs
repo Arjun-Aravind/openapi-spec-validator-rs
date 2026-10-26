@@ -28,6 +28,7 @@
 //!
 //! [openapi-spec-validator]: https://github.com/python-openapi/openapi-spec-validator
 
+mod combinators;
 mod context;
 mod document;
 pub mod error;
@@ -184,7 +185,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let (document_errors, walk) = std::thread::scope(|scope| {
         if spec_is_large(spec) {
             // A thread of its own even on a large-stack thread: the point is concurrency.
-            let document = spawn_large(scope, || document_errors(spec, version));
+            let document = spawn_large(scope, || document_errors(spec, version, first_only));
             let walk = on_large_stack(scope, || {
                 walk(
                     spec, version, first_only, base_uri, retriever, stack, nesting,
@@ -193,7 +194,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
             (document.join(), walk.join())
         } else {
             on_large_stack(scope, || {
-                let errors = document_errors(spec, version);
+                let errors = document_errors(spec, version, first_only);
                 if first_only && !errors.is_empty() {
                     (errors, Ok(Vec::new()))
                 } else {
@@ -431,14 +432,13 @@ fn document_recursion(
     // The rest of the document, without what lies beyond the limit, may hold an error
     // that upstream reports before it gets that deep.
     let pruned = frames::pruned(spec, &probe.prune);
-    let first = document_errors(&pruned, version).into_iter().find(|error| {
-        let inside = error.schema_error.as_deref().is_some_and(|details| {
+    let first = first_document_error(&pruned, version, |error| {
+        error.schema_error.as_deref().is_some_and(|details| {
             probe.prune.iter().any(|location| {
                 details.instance_path.len() > location.len()
                     && details.instance_path.starts_with(location)
             })
-        });
-        !inside
+        })
     });
     Some(match first {
         Some(error) if frames::precedes(&schemas, spec, &error, crossing) => {
@@ -448,17 +448,45 @@ fn document_recursion(
     })
 }
 
-/// Errors from validating the whole document against the version's meta-schema.
-fn document_errors(spec: &Value, version: SpecVersion) -> Vec<ValidationError> {
-    let validator = meta::document_validator(version);
-    if validator.is_valid(spec) {
+/// Errors from validating the whole document against the version's meta-schema: all of
+/// them, or only the first Python's iteration yields.
+fn document_errors(spec: &Value, version: SpecVersion, first_only: bool) -> Vec<ValidationError> {
+    if first_only {
+        return first_document_error(spec, version, |_| false)
+            .into_iter()
+            .collect();
+    }
+    if meta::document_validator(version).is_valid(spec) {
         return Vec::new();
     }
     meta::convert_errors(
-        validator.iter_errors(spec),
+        errors_validator(version).iter_errors(spec),
         &meta::document_schemas(version),
         spec,
     )
+}
+
+/// The first error of the document check, among those `skip` does not reject.
+fn first_document_error(
+    spec: &Value,
+    version: SpecVersion,
+    skip: impl Fn(&ValidationError) -> bool,
+) -> Option<ValidationError> {
+    if meta::document_validator(version).is_valid(spec) {
+        return None;
+    }
+    meta::first_error(
+        errors_validator(version).iter_errors(spec),
+        &meta::document_schemas(version),
+        spec,
+        skip,
+    )
+}
+
+/// The validator that reports the document check's errors (validity is decided by the
+/// faster [`meta::document_validator`]).
+fn errors_validator(version: SpecVersion) -> &'static jsonschema::Validator {
+    meta::lazy_document_validator(version).unwrap_or_else(|| meta::document_validator(version))
 }
 
 /// Upstream's keyword walk: its errors, or the message of the exception it would raise.

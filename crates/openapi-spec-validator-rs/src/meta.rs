@@ -15,6 +15,7 @@ use jsonschema::paths::{Location, LocationSegment};
 use jsonschema::{Keyword, Registry, Validator};
 use serde_json::{Map, Value};
 
+use crate::combinators;
 use crate::error::{SchemaErrorDetails, ValidationError};
 use crate::formats::{self, FormatOutcome, FormatSet};
 use crate::pyregex::{self, PyRegex};
@@ -174,6 +175,66 @@ pub(crate) fn document_validator(version: SpecVersion) -> &'static Validator {
             .build(document_schema(version))
             .expect("bundled document meta-schemas compile")
     })
+}
+
+/// Private URI of the Swagger 2.0 meta-schema, which has no `id` of its own.
+const SWAGGER20_URN: &str = "urn:openapi-spec-validator-rs:swagger-2.0";
+const OAS30_SCHEMA_ID: &str = "https://spec.openapis.org/oas/3.0/schema/2021-09-28";
+
+/// The bundled schemas holding the `oneOf` and `anyOf` of each version's document check.
+static V20_RESOURCES: [(&str, &LazyLock<Value>); 2] =
+    [(SWAGGER20_URN, &SCHEMA_V20), (DRAFT4_URN, &PY_DRAFT4)];
+static V30_RESOURCES: [(&str, &LazyLock<Value>); 1] = [(OAS30_SCHEMA_ID, &SCHEMA_V30)];
+
+/// The Draft 4 document meta-schemas, by URI, for the branch validators of
+/// [`combinators`].
+static DOCUMENT_REGISTRY: LazyLock<Registry<'static>> = LazyLock::new(|| {
+    Registry::new()
+        .add(DRAFT4_URN, &*PY_DRAFT4)
+        .and_then(|r| r.add(SWAGGER20_URN, &*SCHEMA_V20))
+        .and_then(|r| r.add(OAS30_SCHEMA_ID, &*SCHEMA_V30))
+        .and_then(|r| r.prepare())
+        .expect("bundled document meta-schemas form a valid registry")
+});
+
+fn lazy_options(
+    resources: &'static [(&'static str, &'static LazyLock<Value>)],
+    build: combinators::Build,
+) -> jsonschema::ValidationOptions<'static> {
+    jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft4)
+        .with_registry(&DOCUMENT_REGISTRY)
+        .should_validate_formats(false)
+        .with_keyword("pattern", py_pattern)
+        .with_keyword("type", py_type_draft4)
+        .with_keyword("oneOf", combinators::factory(resources, true, build))
+        .with_keyword("anyOf", combinators::factory(resources, false, build))
+}
+
+fn build_lazy_v20(schema: &Value) -> Validator {
+    lazy_options(&V20_RESOURCES, build_lazy_v20)
+        .build(schema)
+        .expect("bundled document meta-schemas compile")
+}
+
+fn build_lazy_v30(schema: &Value) -> Validator {
+    lazy_options(&V30_RESOURCES, build_lazy_v30)
+        .build(schema)
+        .expect("bundled document meta-schemas compile")
+}
+
+/// [`document_validator`] with `oneOf` and `anyOf` that leave the context of their errors
+/// to be computed when the error is converted (see [`combinators`]), for the versions
+/// whose meta-schemas allow it: Draft 4 has no keywords that depend on what those
+/// branches evaluated.
+pub(crate) fn lazy_document_validator(version: SpecVersion) -> Option<&'static Validator> {
+    static V20: OnceLock<Validator> = OnceLock::new();
+    static V30: OnceLock<Validator> = OnceLock::new();
+    match version {
+        SpecVersion::V2_0 => Some(V20.get_or_init(|| build_lazy_v20(document_schema(version)))),
+        SpecVersion::V3_0 => Some(V30.get_or_init(|| build_lazy_v30(document_schema(version)))),
+        _ => None,
+    }
 }
 
 /// A JSON Schema dialect a schema can be meta-checked against.
@@ -532,7 +593,61 @@ pub(crate) fn convert_error(
     schemas: &Schemas<'_>,
     instance_root: &Value,
 ) -> ValidationError {
-    convert_relative(error, schemas, instance_root, &[], &[])
+    let base = Base {
+        at: &[],
+        instance: instance_root,
+    };
+    convert_relative(error, schemas, instance_root, base, &[], &[], Detail::Full)
+}
+
+/// The `python_order` key of a converted error with absolute paths.
+fn order_key(schemas: &Schemas<'_>, error: &ValidationError, instance_root: &Value) -> Vec<usize> {
+    match (&error.schema_error, schemas.resources.first()) {
+        (Some(details), Some(root)) => python_order(
+            &schemas.resources,
+            root,
+            &details.schema_path,
+            instance_root,
+            &details.instance_path,
+        ),
+        _ => Vec::new(),
+    }
+}
+
+/// The error Python's lazy iteration would yield first, skipping those `skip` rejects
+/// (given with their paths only), converted. Only that error is converted in full, with
+/// its context: what Python never gets to is never built.
+pub(crate) fn first_error<'e>(
+    errors: impl Iterator<Item = jsonschema::ValidationError<'e>>,
+    schemas: &Schemas<'_>,
+    instance_root: &Value,
+    skip: impl Fn(&ValidationError) -> bool,
+) -> Option<ValidationError> {
+    let base = Base {
+        at: &[],
+        instance: instance_root,
+    };
+    let mut first: Option<(Vec<usize>, jsonschema::ValidationError<'e>)> = None;
+    for error in errors.filter(|error| !about_python_object(error, instance_root)) {
+        let located = convert_relative(
+            &error,
+            schemas,
+            instance_root,
+            base,
+            &[],
+            &[],
+            Detail::Location,
+        );
+        if skip(&located) {
+            continue;
+        }
+        let key = order_key(schemas, &located, instance_root);
+        // Ties keep the earlier error, as the stable sort of `convert_errors` does.
+        if first.as_ref().is_none_or(|(first, _)| key < *first) {
+            first = Some((key, error));
+        }
+    }
+    first.map(|(_, error)| convert_error(&error, schemas, instance_root))
 }
 
 /// Converts errors and puts them in the order Python's jsonschema would yield them
@@ -546,17 +661,7 @@ pub(crate) fn convert_errors<'e>(
         .filter(|error| !about_python_object(error, instance_root))
         .map(|error| {
             let converted = convert_error(&error, schemas, instance_root);
-            let key = match (&converted.schema_error, schemas.resources.first()) {
-                (Some(details), Some(root)) => python_order(
-                    &schemas.resources,
-                    root,
-                    &details.schema_path,
-                    instance_root,
-                    &details.instance_path,
-                ),
-                _ => Vec::new(),
-            };
-            (key, converted)
+            (order_key(schemas, &converted, instance_root), converted)
         })
         .collect();
     // Stable: errors Python would yield from the same keyword keep their order.
@@ -628,6 +733,24 @@ impl<'a> Schemas<'a> {
     }
 }
 
+/// The instance a crate error's instance path starts from: the validation root, or for
+/// the errors of a [`combinators`] branch, the instance of the `oneOf` / `anyOf` error.
+#[derive(Clone, Copy)]
+struct Base<'a> {
+    /// Its absolute path.
+    at: &'a [PathItem],
+    instance: &'a Value,
+}
+
+/// How much of an error [`convert_relative`] builds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Detail {
+    /// Everything upstream's error holds.
+    Full,
+    /// Only the keyword and the paths, which give its place in Python's order.
+    Location,
+}
+
 /// Converts `error` with paths relative to its parent error (an `anyOf`/`oneOf` failure),
 /// as jsonschema's `relative_path` / `relative_schema_path` are for errors in `context`.
 /// The parent paths are absolute (from the validation root).
@@ -635,8 +758,10 @@ fn convert_relative(
     error: &jsonschema::ValidationError<'_>,
     schemas: &Schemas<'_>,
     instance_root: &Value,
+    base: Base<'_>,
     parent_instance_path: &[PathItem],
     parent_schema_path: &[PathItem],
+    detail: Detail,
 ) -> ValidationError {
     // Converting a large error tree takes a while: a cancelled validation stops here.
     crate::context::check();
@@ -649,7 +774,11 @@ fn convert_relative(
     };
     let mut instance = error.instance().as_ref();
     let mut location = path_items(paths.schema_path());
-    let mut instance_path = instance_path_items(paths.instance_path(), instance_root);
+    let mut instance_path = [
+        base.at,
+        &instance_path_items(paths.instance_path(), base.instance),
+    ]
+    .concat();
     // jsonschema reports a `false` subschema at its own location; Python's `descend`
     // returns before recording that step, so the error belongs to the keyword that
     // descended, without the member it descended into.
@@ -712,42 +841,98 @@ fn convert_relative(
                 .filter(|item| !matches!(item, PathItem::Key(key) if key == "$ref"))
                 .collect()
         });
-    let context = match error.kind() {
-        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
-            // Each subschema's errors, in the order Python's iteration yields them.
-            context
-                .iter()
-                .flat_map(|branch| {
-                    let mut keyed: Vec<(Vec<usize>, ValidationError)> = branch
-                        .iter()
-                        .filter(|child| !about_python_object(child, instance_root))
-                        .map(|child| {
-                            let converted = convert_relative(
-                                child,
-                                schemas,
-                                instance_root,
-                                &instance_path,
-                                &schema_path,
-                            );
-                            let key = context_order(
-                                schemas,
-                                &converted,
-                                instance_root,
-                                &instance_path,
-                                &schema_path,
-                            );
-                            (key, converted)
-                        })
-                        .collect();
-                    keyed.sort_by(|a, b| a.0.cmp(&b.0));
-                    keyed.into_iter().map(|(_, error)| error)
+    if detail == Detail::Location {
+        return ValidationError::from_schema(
+            String::new(),
+            SchemaErrorDetails {
+                keyword,
+                schema_path: strip_prefix(&schema_path, parent_schema_path).to_vec(),
+                schema: Value::Null,
+                instance_path: strip_prefix(&instance_path, parent_instance_path).to_vec(),
+                instance: Value::Null,
+                cause: None,
+                context: Vec::new(),
+            },
+        );
+    }
+    // A `oneOf` / `anyOf` of `combinators`: its branches, and whether several are valid.
+    let lazy = match error.kind() {
+        ValidationErrorKind::Custom { message, .. }
+            if message == combinators::NONE_VALID || message == combinators::SEVERAL_VALID =>
+        {
+            schema
+                .and_then(|schema| schema.get(&keyword))
+                .and_then(combinators::branches)
+                .map(|branches| (branches, message == combinators::SEVERAL_VALID))
+        }
+        _ => None,
+    };
+    // Each subschema's errors, in the order Python's iteration yields them.
+    let in_order = |branch: &mut dyn Iterator<Item = &jsonschema::ValidationError<'_>>,
+                    base: Base<'_>| {
+        let mut keyed: Vec<(Vec<usize>, ValidationError)> = branch
+            .filter(|child| !about_python_object(child, base.instance))
+            .map(|child| {
+                let converted = convert_relative(
+                    child,
+                    schemas,
+                    instance_root,
+                    base,
+                    &instance_path,
+                    &schema_path,
+                    Detail::Full,
+                );
+                let key = context_order(
+                    schemas,
+                    &converted,
+                    instance_root,
+                    &instance_path,
+                    &schema_path,
+                );
+                (key, converted)
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        keyed.into_iter().map(|(_, error)| error)
+    };
+    let context = match (error.kind(), &lazy) {
+        (_, Some((branches, false))) => {
+            // Computed now, from each branch's validator, as Python's `oneOf` / `anyOf`
+            // does: the errors of every branch, borrowing the instance.
+            let base = Base {
+                at: &instance_path,
+                instance,
+            };
+            (0..branches.len())
+                .flat_map(|index| {
+                    let errors: Vec<_> = branches.validator(index).iter_errors(instance).collect();
+                    in_order(&mut errors.iter(), base).collect::<Vec<_>>()
                 })
                 .collect()
         }
+        (
+            ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context },
+            _,
+        ) => context
+            .iter()
+            .flat_map(|branch| in_order(&mut branch.iter(), base).collect::<Vec<_>>())
+            .collect(),
         _ => Vec::new(),
     };
     let schema = schema.map_or(Value::Null, official_ids);
-    let (message, keyword, schema) = if items_false {
+    let (message, keyword, schema) = if let Some((branches, several)) = &lazy {
+        let message = if *several {
+            several_valid_message(instance, &schema, &keyword, |index| {
+                branches.validator(index).is_valid(instance)
+            })
+        } else {
+            format!(
+                "{} is not valid under any of the given schemas",
+                repr(instance)
+            )
+        };
+        (message, keyword, schema)
+    } else if items_false {
         (items_false_message(&schema, instance), keyword, schema)
     } else if false_schema.is_some() {
         let message = format!("False schema does not allow {}", repr(instance));
@@ -1113,21 +1298,10 @@ fn python_message(
             format!("{inst} is not valid under any of the given schemas")
         }
         ValidationErrorKind::OneOfMultipleValid { context } => {
-            // Python lists the later valid subschemas, then the first one. A subschema
-            // is valid when its branch of the context has no errors.
-            let subschemas = schema
-                .get("oneOf")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let mut valid = subschemas
-                .iter()
-                .zip(context)
-                .filter(|(_, branch)| branch.is_empty())
-                .map(|(subschema, _)| repr(subschema));
-            let first = valid.next();
-            let reprs: Vec<String> = valid.chain(first).collect();
-            format!("{inst} is valid under each of {}", reprs.join(", "))
+            // A subschema is valid when its branch of the context has no errors.
+            several_valid_message(instance, schema, "oneOf", |index| {
+                context.get(index).is_some_and(Vec::is_empty)
+            })
         }
         ValidationErrorKind::Not { schema } => {
             format!("{inst} should not be valid under {}", repr(schema))
@@ -1144,6 +1318,33 @@ fn python_message(
         }
         _ => error.to_string(),
     }
+}
+
+/// `oneOf`'s message when several subschemas are valid: Python lists the later valid
+/// ones, then the first.
+fn several_valid_message(
+    instance: &Value,
+    schema: &Value,
+    keyword: &str,
+    is_valid: impl Fn(usize) -> bool,
+) -> String {
+    let subschemas = schema
+        .get(keyword)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut valid = subschemas
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| is_valid(*index))
+        .map(|(_, subschema)| repr(subschema));
+    let first = valid.next();
+    let reprs: Vec<String> = valid.chain(first).collect();
+    format!(
+        "{} is valid under each of {}",
+        repr(instance),
+        reprs.join(", ")
+    )
 }
 
 fn join_reprs<'s>(items: impl Iterator<Item = &'s str>) -> String {

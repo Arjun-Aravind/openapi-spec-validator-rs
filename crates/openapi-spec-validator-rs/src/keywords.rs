@@ -683,13 +683,12 @@ impl<'d, 'a> Walker<'d, 'a> {
             return Ok(None);
         }
         // `check_schema` raises the first error Python's iteration finds.
-        let error = meta::convert_errors(
+        let error = meta::first_error(
             validator.iter_errors(schema.value),
             &meta::meta_check_schemas(dialect),
             schema.value,
-        )
-        .into_iter()
-        .next();
+            |_| false,
+        );
         if let Some(message) = error.as_ref().and_then(meta::crash_message) {
             return Err(Stop::Crash(message.to_owned()));
         }
@@ -711,16 +710,14 @@ impl<'d, 'a> Walker<'d, 'a> {
             return Err(recursion());
         };
         let pruned = crate::frames::pruned(schema, &probe.prune);
-        let first = meta::convert_errors(validator.iter_errors(&pruned), schemas, &pruned)
-            .into_iter()
-            .find(|error| {
-                !error.schema_error.as_deref().is_some_and(|details| {
-                    probe.prune.iter().any(|location| {
-                        details.instance_path.len() > location.len()
-                            && details.instance_path.starts_with(location)
-                    })
+        let first = meta::first_error(validator.iter_errors(&pruned), schemas, &pruned, |error| {
+            error.schema_error.as_deref().is_some_and(|details| {
+                probe.prune.iter().any(|location| {
+                    details.instance_path.len() > location.len()
+                        && details.instance_path.starts_with(location)
                 })
-            });
+            })
+        });
         match first {
             Some(error) if crate::frames::precedes(schemas, schema, &error, crossing) => {
                 if let Some(message) = meta::crash_message(&error) {
