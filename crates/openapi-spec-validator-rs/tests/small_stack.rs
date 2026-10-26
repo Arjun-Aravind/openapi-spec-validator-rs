@@ -3,7 +3,7 @@
 //! fail with an error instead of overflowing it.
 
 use openapi_spec_validator_rs::{
-    LoadError, Options, Outcome, STACK_TOO_SMALL, load, nesting_limit, validate, within_this_stack,
+    LoadError, Options, Outcome, STACK_TOO_SMALL, load, validate, within_this_stack,
 };
 use serde_json::{Value, json};
 
@@ -32,17 +32,22 @@ fn on_small_thread<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 }
 
 /// How deeply documents may nest on a fresh thread with a `stack_size` stack.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn nesting_allowed(stack_size: usize) -> Option<usize> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(stack_size)
-            .spawn_scoped(scope, || within_this_stack(nesting_limit))
+            .spawn_scoped(scope, || {
+                within_this_stack(openapi_spec_validator_rs::nesting_limit)
+            })
             .expect("thread")
             .join()
             .expect("no overflow")
     })
 }
 
+/// Only where the platform tells the stack's bounds; elsewhere a 1 MiB stack is assumed.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 #[test]
 fn the_nesting_allowed_follows_what_is_left_of_the_stack() {
     // 2 KiB per level, after a 512 KiB reserve and what the thread already uses (the
