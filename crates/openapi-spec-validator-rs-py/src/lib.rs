@@ -137,7 +137,7 @@ fn raised_in(py: Python<'_>, error: &ValidationError, objects: &PythonObjects) -
 /// Validates a spec given as Python objects, as the given version (`"2.0"`, `"3.0"`,
 /// `"3.1"` or `"3.2"`). `retriever` fetches `http(s)://` `$ref` targets.
 #[pyfunction]
-#[pyo3(signature = (spec, version, base_uri, all_errors, retriever=None, python_depth=None, recursion_limit=None))]
+#[pyo3(signature = (spec, version, base_uri, all_errors, retriever=None, python_depth=None, recursion_limit=None, follow_root_ref=true))]
 #[allow(clippy::too_many_arguments)]
 fn validate(
     py: Python<'_>,
@@ -148,6 +148,7 @@ fn validate(
     retriever: Option<Py<PyAny>>,
     python_depth: Option<usize>,
     recursion_limit: Option<usize>,
+    follow_root_ref: bool,
 ) -> PyResult<Vec<CoreError>> {
     let stack = python_stack(python_depth, recursion_limit, all_errors);
     let retriever = self::retriever(retriever);
@@ -161,7 +162,11 @@ fn validate(
     let (outcome, objects) = stack::run(py, move || {
         let (value, objects) = stack::attach(|py| to_value(spec.bind(py)))?;
         let outcome = with_python_stack(stack, || {
-            openapi_spec_validator_rs::validate(&value, &options)
+            if follow_root_ref {
+                openapi_spec_validator_rs::validate(&value, &options)
+            } else {
+                openapi_spec_validator_rs::validate_as_given(&value, &options)
+            }
         });
         // Freeing a large document takes a while too: do it before re-attaching.
         drop(value);

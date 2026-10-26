@@ -45,6 +45,7 @@ def validate(
     retriever: Retriever | None = None,
     python_depth: int | None = None,
     recursion_limit: int | None = None,
+    follow_root_ref: bool = True,
 ) -> list[CoreError]: ...
 def validate_bytes(
     data: bytes,

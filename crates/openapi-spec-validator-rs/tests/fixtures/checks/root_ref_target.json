@@ -1,0 +1,5 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "What the root reference points to, without a version"},
+  "paths": {}
+}

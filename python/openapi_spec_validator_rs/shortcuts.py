@@ -82,7 +82,10 @@ def validate(
     """
     if cls is None:
         cls = get_validator_cls(spec)
-    cls(spec, base_uri=base_uri).validate()
+    validator = cls(spec, base_uri=base_uri)
+    # Upstream reads the document through a `SchemaPath`, which follows a root `$ref`.
+    validator._follow_root_ref = True
+    validator.validate()
 
 
 def validate_url(spec_url: str, cls: SpecValidatorType | None = None) -> None:

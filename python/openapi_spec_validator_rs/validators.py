@@ -40,6 +40,9 @@ class SpecValidator:
     """
 
     spec_version: ClassVar[SpecVersion]
+    # Upstream's classes check a plain mapping as given; its `validate()` shortcut wraps
+    # it in a `SchemaPath`, which follows a `$ref` at the root.
+    _follow_root_ref: bool = False
 
     def __init__(
         self,
@@ -90,6 +93,7 @@ class SpecValidator:
             handlers.retrieve,
             _stack.spec_depth(),
             _stack.limit(),
+            follow_root_ref=self._follow_root_ref,
         )
         return [_from_core(error) for error in errors]
 

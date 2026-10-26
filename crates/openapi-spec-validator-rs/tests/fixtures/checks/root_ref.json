@@ -1,0 +1,6 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "The root is a reference to another document", "version": "1.0"},
+  "paths": {},
+  "$ref": "root_ref_target.json"
+}

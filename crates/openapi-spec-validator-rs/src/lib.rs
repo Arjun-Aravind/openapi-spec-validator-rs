@@ -146,6 +146,21 @@ fn default_retriever() -> Option<Arc<dyn Retrieve>> {
 /// on threads of its own with a large stack: any document [`load`] accepts can be
 /// validated from any thread.
 pub fn validate(spec: &Value, options: &Options) -> Outcome {
+    // Upstream's `validate()` follows a `$ref` at the root; its `iter_errors()`, which
+    // collects every error (and which its command line uses for that), does not.
+    validate_document(spec, options, options.errors == ErrorMode::First)
+}
+
+/// [`validate`], checking `spec` itself against the meta-schema even when its root is a
+/// `$ref`, as upstream's validator classes do when given a plain mapping.
+///
+/// Not a supported API: used by the Python bindings.
+#[doc(hidden)]
+pub fn validate_as_given(spec: &Value, options: &Options) -> Outcome {
+    validate_document(spec, options, false)
+}
+
+fn validate_document(spec: &Value, options: &Options, follow_root_ref: bool) -> Outcome {
     let version = match options.version {
         Some(version) => version,
         None => match detect_version(spec) {
@@ -156,6 +171,20 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let first_only = options.errors == ErrorMode::First;
     let base_uri = options.base_uri.as_str();
     let retriever = options.retriever.as_deref();
+
+    // Upstream's `validate()` reads the document through a jsonschema-path `SchemaPath`,
+    // which follows a `$ref` at its root, ignoring the keys beside it: the meta-schema
+    // check sees what the reference points to (the walk resolves it as it goes).
+    let root_documents;
+    let checked = if follow_root_ref && document::as_ref(spec).is_some() {
+        root_documents = Documents::new(spec, base_uri, retriever);
+        match root_documents.resolve(root_documents.root()) {
+            Ok(node) => node.value,
+            Err(crash) => return Outcome::Error(crash.0),
+        }
+    } else {
+        spec
+    };
 
     // Upstream's check against the meta-schema recurses as deep as the document nests,
     // and gives up past Python's recursion limit.
@@ -168,10 +197,18 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let (recursion, nesting) = std::thread::scope(|scope| {
         on_large_stack(scope, || {
             let nesting = frames::nesting(spec);
-            (
-                document_recursion(spec, version, first_only, budget, nesting),
-                nesting,
-            )
+            let recursion = if std::ptr::eq(checked, spec) {
+                document_recursion(spec, version, first_only, budget, nesting)
+            } else {
+                document_recursion(
+                    checked,
+                    version,
+                    first_only,
+                    budget,
+                    frames::nesting(checked),
+                )
+            };
+            (recursion, nesting)
         })
         .join()
     });
@@ -185,7 +222,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
     let (document_errors, walk) = std::thread::scope(|scope| {
         if spec_is_large(spec) {
             // A thread of its own even on a large-stack thread: the point is concurrency.
-            let document = spawn_large(scope, || document_errors(spec, version, first_only));
+            let document = spawn_large(scope, || document_errors(checked, version, first_only));
             let walk = on_large_stack(scope, || {
                 walk(
                     spec, version, first_only, base_uri, retriever, stack, nesting,
@@ -194,7 +231,7 @@ pub fn validate(spec: &Value, options: &Options) -> Outcome {
             (document.join(), walk.join())
         } else {
             on_large_stack(scope, || {
-                let errors = document_errors(spec, version, first_only);
+                let errors = document_errors(checked, version, first_only);
                 if first_only && !errors.is_empty() {
                     (errors, Ok(Vec::new()))
                 } else {
