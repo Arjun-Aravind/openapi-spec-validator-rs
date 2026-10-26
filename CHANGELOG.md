@@ -22,24 +22,46 @@ All notable changes to this project are documented here. The format follows
   raising `PanicException`.
 - When no thread can be started (a `ulimit -v` or process limit), validation runs on
   the calling thread instead of failing with `RuntimeError: cannot start the validation
-  thread`, and the `pip` command no longer prints a traceback. Each validation also
+  thread`, and the `pip` command no longer prints a traceback. Smaller stacks are tried
+  first; on the calling thread, documents nest only as deeply as its stack allows, and a
+  deeper one raises `RuntimeError` instead of overflowing it. Each validation also
   needs one thread instead of two and reserves 64 MiB of stack instead of 320 MiB.
+- A daemon thread downloading a remote `$ref` when the interpreter exits no longer
+  aborts the process on Python 3.10 to 3.12 (it did in most such runs on Linux with
+  3.12), nor does Ctrl-C during a download: downloads now run in Python code on the
+  calling thread, as upstream's do.
 - `file:` references are opened as Python's `urlopen` opens them: a `$ref` with more
   `../` segments than its base has directories no longer reads a file from the root
   (`/etc/passwd`); like upstream on Python 3.13, it is relative to the working
   directory. Percent-escapes, `localhost` and other hosts follow `urlopen` too.
 - A `$ref` at the root of a document is followed as upstream's `validate()` follows it,
   checking the document it points to (upstream's `iter_errors()` and its command line's
-  `--validation-errors all` check the document as given, and so does this port).
+  `--validation-errors all` check the document as given, and so does this port). A
+  `SchemaPath` with a root `$ref` is followed the same way, and the document it points to
+  is read once.
+- `$ref`s follow jsonschema-path and referencing in more edge cases: a reference to a
+  scalar under `responses`, `content` or a path item, `$id`s met inside schemas on the
+  way to a pointer's target or before another document is read, and parameters whose
+  `name` or `in` is itself a `$ref`.
+- `default` checks of OpenAPI 3.0 schemas raise what upstream raises for a `type` that is
+  not a string, a `format` that is a list or a mapping, and an `allOf`, `anyOf` or `oneOf`
+  that is not a list.
+- A `file:` URL whose host is this machine's name or one of its addresses is read, as
+  `urlopen` reads it; a `$ref` URL with a malformed host in brackets fails with
+  `urlsplit`'s message.
+- The Swagger 2.0 meta-schema shown in errors refers to Draft 4 by its official URL
+  instead of an internal name.
 - Deeply nested valid documents validate 3 to 4 times faster than in 0.2.3 (0.4 to
   0.6 ms for 100 nested schemas, which took 1.8 ms).
 
 ### Added
 
-- Python 3.14's standard library is followed where upstream's output depends on it
-  (`urljoin`, `file:` URLs with a query, `\z` and `\B` in patterns, and the wording of
-  several errors). The Python package follows the interpreter it runs on; the command
-  line takes `--python-version 3.13` (the default for the Rust binary) or `3.14`.
+- The running Python's standard library is followed, from 3.10 to 3.14, where upstream's
+  output depends on it: pattern syntax and Unicode tables (3.10 has no atomic groups or
+  possessive repeats, 3.14 accepts `\z`, ...), `urljoin` and `file:` URLs, the
+  space-padded hours `format: time` accepts, and the wording of several errors. The
+  Python package follows the interpreter it runs on; the command line takes
+  `--python-version 3.13` (the default for the Rust binary) or `3.14`.
 - The `settings`, `schemas` and `versions.finders` modules upstream has.
 
 ### Changed

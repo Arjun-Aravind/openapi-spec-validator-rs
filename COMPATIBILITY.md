@@ -13,24 +13,33 @@ packages such as `rfc3987` or `fqdn`.
 ### Python versions
 
 Upstream's output depends a little on the Python it runs on, because parts of the standard
-library it relies on changed in Python 3.14:
+library it relies on changed between versions (as found in the latest release of each):
 
-* `urljoin` keeps the root when a `$ref` has more `../` segments than its base has
-  directories (3.13 produced a relative `file:` URL, opened relative to the working
-  directory), and keeps an empty `?` or `#`;
-* `urlopen` drops the query of a `file:` URL instead of reading it as part of the file name;
-* `\z` is a valid end-of-string escape in patterns, and `\B` matches the empty string;
-* several messages are worded differently: `argument of type 'NoneType' is not a
-  container or iterable`, `cannot use 'list' as a dict key (unhashable type: 'list')`,
-  `division by zero`, and the date and time errors (`month must be in 1..12, not 13`,
-  `day 30 must be in range 1..29 for month 2 in year 2020`).
+* Patterns (`pattern`, `format: regex`): 3.10 has no atomic groups (`(?>...)`) or
+  possessive repeats (`a*+`), and accepts global flags such as `(?i)` anywhere in a
+  pattern, where they apply to all of it; 3.10 and 3.11 read a group condition that is
+  not a name with `int()` (`(?(+1)a)`); 3.10 to 3.12 accept the `(?t)` flag; 3.14 accepts
+  `\z` and lets `\B` match the empty string. Identifiers, letters, `\w` and `\d` follow
+  each version's Unicode database, from 13.0 in 3.10 to 16.0 in 3.14.
+* URLs: `urljoin` keeps the root when a `$ref` has more `../` segments than its base has
+  directories in 3.10, 3.11 and 3.14; 3.12 and 3.13 produce a relative `file:` URL,
+  opened relative to the working directory. 3.14 also keeps an empty `?` or `#`, and 3.10
+  accepts a scheme that starts with a digit. `urlopen` reads `%`-escapes in a `file:`
+  path that are not UTF-8 as U+FFFD up to 3.11, and from 3.14 drops the query instead of
+  reading it as part of the file name.
+* `format: time` accepts a space-padded hour (`" 1:30:00"`) from 3.13.
+* Messages: 3.10 leaves the type out of some errors (`expected string or bytes-like
+  object`, `string indices must be integers`); 3.14 words several differently
+  (`argument of type 'NoneType' is not a container or iterable`, `cannot use 'list' as a
+  dict key (unhashable type: 'list')`, `division by zero`, and the date and time errors
+  such as `month must be in 1..12, not 13`).
 
 The Python package (and with it the `pip`-installed command and the pre-commit hook)
-follows the interpreter it runs on: 3.10 to 3.13 behave as 3.13, 3.14 and later as 3.14.
-The Rust binary follows 3.13 unless given `--python-version 3.14`. Python 3.15 changed
-nothing more that upstream depends on, but PyYAML 6.0.3 has no compiled parser for it, so
-upstream on 3.15 falls back to PyYAML's pure-Python parser: its YAML error messages are
-worded differently and very deep documents fail sooner, until PyYAML publishes 3.15 wheels.
+follows the interpreter it runs on, 3.15 as 3.14. The Rust binary follows 3.13 unless
+given `--python-version 3.14`. Python 3.15 changed nothing more that upstream depends on,
+but PyYAML 6.0.3 has no compiled parser for it, so upstream on 3.15 falls back to PyYAML's
+pure-Python parser: its YAML error messages are worded differently and very deep documents
+fail sooner, until PyYAML publishes 3.15 wheels.
 
 ## Checks
 
@@ -112,7 +121,9 @@ These behaviours look surprising but are reproduced on purpose:
 | Draft 3 schemas in 3.1+ | A schema declaring `"$schema": "http://json-schema.org/draft-03/schema#"` is reported as an unknown dialect, and inside a `default`'s schema such a subschema keeps the surrounding dialect. Upstream validates it as Draft 3. | None seen in practice |
 | Extremely deep nesting | Upstream checks a document against its meta-schema, and each schema against its dialect's, by recursion, and gives up with `Error: maximum recursion depth exceeded` (exit 2) once that recursion passes Python's limit: around 122 levels of `properties` or `allOf` in 3.0 (163 through `items`), 162 in 2.0, 61 to 81 in 3.1 and 3.2, fewer the deeper in the document the schema sits. This port replays that recursion with a model of the frames each step of jsonschema's traversal uses (`crates/openapi-spec-validator-rs/src/frames.rs`, fitted to measurements of upstream with `scripts/frames/`) and gives up where upstream does, reporting instead an error upstream finds first. The model predicts upstream's deepest stack exactly for 7,869 of the 7,881 checks in a sample of 120 APIs.guru specs (the others are one frame short, where upstream re-checks a `oneOf` branch with `is_valid`), and on 228 generated shapes (versions, nesting keywords, valid and invalid leaves, schemas in components and responses, both output modes) it gives up at the same depth as upstream, with identical output just below, at and above it. The command line counts frames as upstream's console script does (`openapi-spec-validator`, two frames shallower with `--validation-errors all`); `python -m openapi_spec_validator` runs two frames deeper. The Python API counts the caller's own frames and `sys.getrecursionlimit()`, as upstream's recursion does; on interpreters before 3.12, which also count some C calls, upstream gives up up to one level earlier than this package (measured on 3.10). | Pathological documents |
 | Documents nested beyond the reading limit | Reading stops as soon as containers nest deeper than the 9,989 levels upstream's JSON round trip accepts (mappings flattened by merge keys not counted, as the round trip does not see them), with its `maximum recursion depth exceeded while encoding a JSON object` (exit 1), without scanning the rest of the file: libyaml's scanner slows quadratically with the nesting of mappings (100,000 levels took 25 s before; PyYAML scans at the same speed but crashes at about 50,000 levels, after about 5 s). Upstream reads the whole file first, so it would instead report what it meets elsewhere: a YAML syntax error or a second document further on, an unknown tag, an unhashable mapping key or an unserialisable value above the deep part, or nothing at all when the deep part sits under a duplicated key it discards. The limit itself mirrors `python -m openapi_spec_validator` on CPython 3.13 (9,989 for files, 9,992 for standard input); upstream's console script runs three frames shallower and accepts three levels more, and other CPython versions differ by a few levels. | Pathological documents |
-| Python 3.14 and later | On 3.14 upstream reads documents nested deeper than the 9,989 levels its JSON round trip accepts on 3.13, up to a limit set by the C stack (which varies by platform and thread), and then fails in ways that depend on it: a traceback while printing the error, or an `Error:` with an empty message. This port keeps the 3.13 reading limit. Patterns follow Unicode 15.1 (CPython 3.13) for `\w`, `\d` and case-insensitive matching, where 3.14 uses Unicode 16: only characters assigned in Unicode 16 match differently. A `file:` URL counts as local when its host is empty, `localhost` or `127.0.0.1`; Python also accepts this machine's name and addresses. On Windows, `file:` URLs are read as standard file URLs rather than with Python's `nturl2path` rules. | Pathological documents |
+| Python 3.14 and later | On 3.14 upstream reads documents nested deeper than the 9,989 levels its JSON round trip accepts on 3.13, up to a limit set by the C stack (which varies by platform and thread), and then fails in ways that depend on it: a traceback while printing the error, or an `Error:` with an empty message. This port keeps the 3.13 reading limit. | Pathological documents |
+| Python 3.10 to 3.12 | Case-insensitive matching of patterns uses Unicode 16's case mappings on every version, so a character assigned after the running version's Unicode release may match differently. Python 3.10's regex engine sometimes matches a backreference to a group repeated lazily where 3.11 and later do not (`(a+?){2,}?\1-`); matching follows 3.11. Patterns nested hundreds of groups deep fail where upstream's fail, worded as upstream's check of a `pattern` keyword words it; a `format: regex` `default` that deep is worded slightly differently on 3.10 and 3.11. | Pathological patterns |
+| URLs | `urlsplit` also rejects a non-ASCII host that NFKC normalisation turns into URL delimiters (`\u2100` becomes `a/c`); this port does not. On Windows, `file:` URLs are read as standard file URLs rather than with Python's `nturl2path` rules. A `file:` URL's host is local when its address is one of this machine's, which takes a DNS lookup as it does upstream; where Python's resolver and the system's disagree (seen on macOS for the machine's `.local` name), the outcome may differ. | Rare |
 | Exponential schemas | Some recursive schemas make jsonschema's algorithm revisit the same subschemas at every level, for example two `allOf` members that each refer back to the schema: validating a `default` nested 20 levels deep then takes a second here (over 20 s upstream), and each further level doubles it. This port runs the same algorithm, so both tools slow down on the same documents. | Pathological documents |
 | Recursion limit elsewhere | `$ref` chains and recursion while validating a `default` hit Python's limit as upstream does. The thresholds are measured for references and `default`s at a component (a chain of 978 `$ref`s, a `default` 490 `$ref`s or 246 levels of a recursive schema deep); upstream's limit counts the frames above, so elsewhere in a document it can be a few levels off. | Pathological documents |
 | NaN / Infinity, huge integers | YAML `.nan`/`.inf` and numbers too large for a float (`1e400`) load as `null`, and integers beyond 64 bits as floats. So a `default: .nan` fails with `None for not nullable` where upstream accepts it, and `format: int64` accepts `-9223372036854775809` (a float here) where upstream rejects it. | Rare |
@@ -132,7 +143,7 @@ reasons in `tests/upstream_shim/upstream_suite.py`; they are the differences bel
 |---|---|
 | `validate(spec, base_uri="", cls=None)` | Same |
 | `validate_url(spec_url, cls=None)` | Same: fetched with `urllib.request.urlopen` (`http`, `https`, `file`) and parsed exactly as upstream parses it, reading only as far as PyYAML would (a stream libyaml cannot decode, `/dev/zero` say, is given up on at its first bad bytes rather than read to the end). `cls` only selects the version. |
-| `$ref`s to other documents | Same: files are read from disk and `http(s)://` documents are fetched, lazily, through `openapi_spec_validator_rs.handlers`, which uses `requests` when it is importable and `urllib` otherwise, exactly as jsonschema-path's default handlers, with the URL joined as `urljoin` joins it. A `SchemaPath` passed in is read through its own base URI; custom handlers attached to it are not used. Validation runs on a thread of its own while the calling thread handles signals, so Ctrl-C (`KeyboardInterrupt`, or whatever a signal handler raises) takes effect at once, as it does upstream, and the validation under way is cancelled: it stops within milliseconds, except for a download in progress, which ends or times out (10 seconds) first. |
+| `$ref`s to other documents | Same: files are read from disk and `http(s)://` documents are fetched, lazily, through `openapi_spec_validator_rs.handlers`, which uses `requests` when it is importable and `urllib` otherwise, exactly as jsonschema-path's default handlers, with the URL joined as `urljoin` joins it. A `SchemaPath` passed in is read through its own base URI; custom handlers attached to it are not used. Validation runs on a thread of its own while the calling thread handles signals, so Ctrl-C (`KeyboardInterrupt`, or whatever a signal handler raises) takes effect at once, as it does upstream, and the validation under way is cancelled: it stops within milliseconds. Downloads run on the calling thread, in Python code, as upstream's do, so an interrupt stops one as it stops upstream's, and a daemon thread downloading when the interpreter exits ends as upstream's does. |
 | | `validate_path(path, cls=None)`: reads a file like the command line, resolving relative `$ref`s against it |
 | `validate_spec`, `validate_spec_url` (deprecated) | Same, with the same warnings (and, like upstream, `validate_spec` ignores `base_uri` unless `validator` is given) |
 | `OpenAPIV2SpecValidator`, `OpenAPIV30SpecValidator`, `OpenAPIV31SpecValidator`, `OpenAPIV32SpecValidator`, `OpenAPIV3SpecValidator` | Same constructor `(schema, base_uri="")` and `validate()`, `is_valid()`, `iter_errors()`. A jsonschema-path `SchemaPath` is accepted too. |
@@ -205,7 +216,10 @@ a string (`'datetime.date' object is not iterable`) is raised with the same mess
   space, committed only as used), and the allocator reserves about 1 GiB when the
   extension loads. When no thread can be started (a virtual memory limit such as
   `ulimit -v`, or a process limit), validation runs on the calling thread instead, and
-  Ctrl-C then takes effect only once it finishes.
+  Ctrl-C then takes effect only once it finishes. Documents then nest only as deeply as
+  that thread's stack allows (about 2 KiB per level, after keeping 512 KiB free); a deeper
+  one raises `RuntimeError: cannot start the validation thread, and the document nests
+  too deeply for the calling thread's stack` instead of overflowing it.
 * Upstream's settings (`OPENAPI_SPEC_VALIDATOR_RESOLVED_CACHE_MAXSIZE`,
   `OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND`) do not apply: validation always
   follows the default `jsonschema` backend.

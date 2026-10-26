@@ -76,8 +76,8 @@ It accepts the same arguments (`--schema {detect,2.0,3.0,3.1,3.2}`,
 `--validation-errors {first,all}`, `--subschema-errors {best-match,all}`, `-` for standard
 input), prints the same messages and exits with the same status: 0 when valid, 1 for a
 validation or read error, 2 for any other error. Where upstream's output depends on the
-Python version (a few messages and `$ref` edge cases changed in Python 3.14), the `pip`
-command follows the interpreter it runs on and the Rust binary follows 3.13;
+Python version (pattern syntax, a few messages and `$ref` edge cases changed between 3.10
+and 3.14), the `pip` command follows the interpreter it runs on and the Rust binary follows 3.13;
 `--python-version 3.14` selects 3.14's behaviour (see [COMPATIBILITY.md](COMPATIBILITY.md)). Several files are validated in parallel
 and reported in order. `$ref`s to other files and to `http(s)://` URLs are followed as
 upstream follows them: the `pip`-installed command fetches with Python's `urllib` (or
