@@ -17,22 +17,14 @@ use crate::stack::{Event, Fetch};
 /// (`KeyboardInterrupt`, `SystemExit`) would propagate upstream, so it is kept and
 /// re-raised once the validation returns (see [`PyRetriever::interrupt`]).
 ///
-/// While a [`crate::stack::run`] serves it, the function is called on that run's calling
-/// thread, never on the library's threads (see there why).
+/// While a [`crate::stack::Task`] serves it, the task's caller downloads in Python instead,
+/// never the library's threads (see there why); only when no thread could be started is the
+/// function called here.
 pub struct PyRetriever {
     callable: Py<PyAny>,
     interrupt: Mutex<Option<PyErr>>,
-    /// Where downloads go while a run serves them.
+    /// Where downloads go while a task serves them.
     caller: Mutex<Option<mpsc::Sender<Event>>>,
-}
-
-/// Ends the serving of a [`PyRetriever`] when dropped.
-pub struct Serving<'r>(&'r PyRetriever);
-
-impl Drop for Serving<'_> {
-    fn drop(&mut self) {
-        *self.0.caller.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
 }
 
 impl PyRetriever {
@@ -44,10 +36,9 @@ impl PyRetriever {
         }
     }
 
-    /// Sends the downloads asked for from now on to `caller`, until the guard is dropped.
-    pub fn serve(&self, caller: mpsc::Sender<Event>) -> Serving<'_> {
+    /// Sends the downloads asked for from now on to `caller`.
+    pub fn serve(&self, caller: mpsc::Sender<Event>) {
         *self.caller.lock().unwrap_or_else(PoisonError::into_inner) = Some(caller);
-        Serving(self)
     }
 
     /// The non-`Exception` error the function raised, if any, to re-raise.
@@ -61,24 +52,26 @@ impl PyRetriever {
 
 impl PyRetriever {
     /// Calls the function, on a thread attached to the interpreter.
-    pub fn call(&self, py: Python<'_>, url: &str) -> Result<Vec<u8>, RetrieveError> {
-        let result = self
-            .callable
-            .call1(py, (url,))
-            .and_then(|body| body.extract::<PyBackedBytes>(py).map_err(PyErr::from));
-        match result {
-            Ok(bytes) => Ok(bytes.to_vec()),
-            Err(error) => {
-                let message = error.to_string();
-                if !error.is_instance_of::<PyException>(py) {
-                    *self
-                        .interrupt
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(error);
-                }
-                Err(RetrieveError::new(message))
+    fn call(&self, py: Python<'_>, url: &str) -> Result<Vec<u8>, RetrieveError> {
+        let downloaded = self.callable.bind(py).call1((url,));
+        if let Err(error) = &downloaded {
+            if !error.is_instance_of::<PyException>(py) {
+                *self
+                    .interrupt
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(error.clone_ref(py));
             }
         }
+        answer(downloaded)
+    }
+}
+
+/// What a download (the function's return value, or what it raised) gives the validator:
+/// the bytes of the document, or why the reference is unresolvable.
+pub fn answer(downloaded: PyResult<Bound<'_, PyAny>>) -> Result<Vec<u8>, RetrieveError> {
+    match downloaded.and_then(|body| body.extract::<PyBackedBytes>().map_err(PyErr::from)) {
+        Ok(bytes) => Ok(bytes.to_vec()),
+        Err(error) => Err(RetrieveError::new(error.to_string())),
     }
 }
 

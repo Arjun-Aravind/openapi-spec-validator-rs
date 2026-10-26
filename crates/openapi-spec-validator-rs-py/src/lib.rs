@@ -21,6 +21,7 @@ use pyo3::types::PyType;
 
 use crate::convert::{PythonObjects, to_python, to_value};
 use crate::retrieve::PyRetriever;
+use crate::stack::{Finish, Task};
 
 // Converting and parsing large documents makes millions of small allocations.
 #[global_allocator]
@@ -136,8 +137,24 @@ fn raised_in(py: Python<'_>, error: &ValidationError, objects: &PythonObjects) -
         .or_else(|| objects.raised_for(py, &error.message))
 }
 
+/// The [`Finish`] of a validation: its errors as Python objects.
+fn finish_errors(
+    retriever: Option<Arc<PyRetriever>>,
+    outcome: Outcome,
+    objects: PythonObjects,
+) -> Finish {
+    Box::new(move |py| {
+        check_interrupt(retriever.as_ref())?;
+        Ok(into_errors(py, outcome, objects)?
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
+    })
+}
+
 /// Validates a spec given as Python objects, as the given version (`"2.0"`, `"3.0"`,
-/// `"3.1"` or `"3.2"`). `retriever` fetches `http(s)://` `$ref` targets.
+/// `"3.1"` or `"3.2"`). `retriever` fetches `http(s)://` `$ref` targets. Returns the
+/// [`Task`] doing it, whose result is the list of errors.
 #[pyfunction]
 #[pyo3(signature = (spec, version, base_uri, all_errors, retriever=None, python_depth=None, recursion_limit=None, follow_root_ref=true))]
 #[allow(clippy::too_many_arguments)]
@@ -151,7 +168,7 @@ fn validate(
     python_depth: Option<usize>,
     recursion_limit: Option<usize>,
     follow_root_ref: bool,
-) -> PyResult<Vec<CoreError>> {
+) -> PyResult<Task> {
     let stack = python_stack(python_depth, recursion_limit, all_errors);
     let retriever = self::retriever(retriever);
     let options = options(
@@ -161,17 +178,16 @@ fn validate(
         retriever.as_ref(),
     );
     let spec = spec.clone().unbind();
-    let (outcome, objects) = stack::run(py, retriever.as_deref(), move || {
+    let finish_retriever = retriever.clone();
+    Task::start(py, retriever.as_deref(), move || {
         let (value, objects) = stack::attach(|py| to_value(spec.bind(py)))?;
         let outcome = with_python_stack(stack, || {
             openapi_spec_validator_rs::validate_root_ref(&value, &options, follow_root_ref)
         });
         // Freeing a large document takes a while too: do it before re-attaching.
         drop(value);
-        Ok((outcome, objects))
-    })?;
-    check_interrupt(retriever.as_ref())?;
-    into_errors(py, outcome, objects)
+        Ok(finish_errors(finish_retriever, outcome, objects))
+    })
 }
 
 enum BytesFailure {
@@ -180,7 +196,8 @@ enum BytesFailure {
 }
 
 /// Parses a document read from a binary stream named `stream_name` (as upstream's
-/// reader does) and validates it, detecting the version unless one is given.
+/// reader does) and validates it, detecting the version unless one is given. Returns the
+/// [`Task`] doing it, whose result is the list of errors.
 #[pyfunction]
 #[pyo3(signature = (data, stream_name, base_uri, version, all_errors, retriever=None, python_depth=None, recursion_limit=None))]
 #[allow(clippy::too_many_arguments)]
@@ -194,13 +211,13 @@ fn validate_bytes(
     retriever: Option<Py<PyAny>>,
     python_depth: Option<usize>,
     recursion_limit: Option<usize>,
-) -> PyResult<Vec<CoreError>> {
+) -> PyResult<Task> {
     let stack = python_stack(python_depth, recursion_limit, all_errors);
     let version = version.map(parse_version).transpose()?;
     let retriever = self::retriever(retriever);
     let worker_retriever = retriever.clone();
-    let result = stack::run(py, retriever.as_deref(), move || {
-        Ok(with_python_stack(stack, || {
+    Task::start(py, retriever.as_deref(), move || {
+        let result = with_python_stack(stack, || {
             load_and_validate(
                 &data,
                 &stream_name,
@@ -209,23 +226,34 @@ fn validate_bytes(
                 all_errors,
                 worker_retriever.as_ref(),
             )
-        }))
-    })?;
-    check_interrupt(retriever.as_ref())?;
-    match result {
-        Ok(outcome) => into_errors(py, outcome, PythonObjects::default()),
-        Err(BytesFailure::Load(error)) if error.message == STACK_TOO_SMALL => {
-            Err(PyRuntimeError::new_err(error.message))
-        }
-        Err(BytesFailure::Load(error)) => Err(exception(py, "SpecReadError", (error.message,))),
-        // Upstream raises `ValidatorDetectError()` without a message.
-        Err(BytesFailure::Detect(DetectError::NotFound)) => {
-            Err(exception(py, "ValidatorDetectError", ()))
-        }
-        Err(BytesFailure::Detect(DetectError::TypeError(message))) => {
-            Err(PyTypeError::new_err(message))
-        }
-    }
+        });
+        let failure = match result {
+            Ok(outcome) => {
+                return Ok(finish_errors(
+                    worker_retriever,
+                    outcome,
+                    PythonObjects::default(),
+                ));
+            }
+            Err(failure) => failure,
+        };
+        Ok(Box::new(move |py: Python<'_>| {
+            check_interrupt(worker_retriever.as_ref())?;
+            Err(match failure {
+                BytesFailure::Load(error) if error.message == STACK_TOO_SMALL => {
+                    PyRuntimeError::new_err(error.message)
+                }
+                BytesFailure::Load(error) => exception(py, "SpecReadError", (error.message,)),
+                // Upstream raises `ValidatorDetectError()` without a message.
+                BytesFailure::Detect(DetectError::NotFound) => {
+                    exception(py, "ValidatorDetectError", ())
+                }
+                BytesFailure::Detect(DetectError::TypeError(message)) => {
+                    PyTypeError::new_err(message)
+                }
+            })
+        }) as Finish)
+    })
 }
 
 fn load_and_validate(
@@ -252,7 +280,7 @@ fn load<'py>(
     data: PyBackedBytes,
     stream_name: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let loaded = stack::run(py, None, move || {
+    let loaded = stack::run(py, move || {
         match openapi_spec_validator_rs::load(&data, &stream_name) {
             Ok(spec) => stack::attach(|py| {
                 Ok(Ok(to_python(py, &spec, &PythonObjects::default())?.unbind()))
@@ -269,7 +297,8 @@ fn load<'py>(
     }
 }
 
-/// Runs the command-line interface and returns `(exit_code, stdout, stderr, ran)`.
+/// Runs the command-line interface: returns the [`Task`] doing it, whose result is
+/// `(exit_code, stdout, stderr, ran)`.
 ///
 /// Output is returned rather than written to the process streams so that Python
 /// code (and pytest's `capsys`) sees it through `sys.stdout` / `sys.stderr`. `ran` is
@@ -286,10 +315,10 @@ fn cli_main(
     args: Vec<String>,
     stdin: Option<PyBackedBytes>,
     retriever: Option<Py<PyAny>>,
-) -> PyResult<(i32, String, String, bool)> {
+) -> PyResult<Task> {
     let retriever = self::retriever(retriever);
     let worker_retriever = retriever.clone();
-    let result = stack::run(py, retriever.as_deref(), move || {
+    Task::start(py, retriever.as_deref(), move || {
         let retriever = worker_retriever;
         let argv =
             std::iter::once("openapi-spec-validator-rs").chain(args.iter().map(String::as_str));
@@ -315,15 +344,17 @@ fn cli_main(
                 &mut err,
             ),
         };
-        Ok((
+        let result = (
             code,
             String::from_utf8_lossy(&out).into_owned(),
             String::from_utf8_lossy(&err).into_owned(),
             ran,
-        ))
-    })?;
-    check_interrupt(retriever.as_ref())?;
-    Ok(result)
+        );
+        Ok(Box::new(move |py: Python<'_>| {
+            check_interrupt(retriever.as_ref())?;
+            Ok(result.into_pyobject(py)?.into_any().unbind())
+        }) as Finish)
+    })
 }
 
 /// The JSON text of the meta-schema of `version` (`"2.0"` to `"3.2"`), as upstream ships it.
@@ -376,6 +407,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_check_finalizing, m)?)?;
     m.add_function(wrap_pyfunction!(_meta_schema, m)?)?;
     m.add_class::<CoreError>()?;
+    m.add_class::<Task>()?;
     m.add_function(wrap_pyfunction!(validate, m)?)?;
     m.add_function(wrap_pyfunction!(validate_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;

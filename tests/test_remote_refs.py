@@ -20,7 +20,7 @@ from typing import Any
 
 import openapi_spec_validator_rs as osv
 import pytest
-from openapi_spec_validator_rs import _core, handlers
+from openapi_spec_validator_rs import _core, _stack, handlers
 from openapi_spec_validator_rs.__main__ import main
 
 # The reference is upstream's default backend, even if jsonschema-rs is installed.
@@ -372,7 +372,7 @@ def test_core_without_a_retriever(server: Server) -> None:
     reference = server.serve("/user.json", USER)
     # The public API always passes a retriever; the extension alone does not fetch.
     with pytest.raises(osv.ValidationAbortedError):
-        _core.validate(spec(reference), "3.0", "", False)
+        _stack.run(_core.validate(spec(reference), "3.0", "", False))
     assert server.hits == []
 
 

@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use openapi_spec_validator_rs::RetrieveError;
@@ -13,7 +14,7 @@ use openapi_spec_validator_rs::{
 use pyo3::exceptions::{PyImportError, PyRuntimeError};
 use pyo3::prelude::*;
 
-use crate::retrieve::PyRetriever;
+use crate::retrieve::{PyRetriever, answer};
 
 /// Documents may nest almost 10 000 containers deep (the reader's limit), and loading,
 /// validating, rendering and even dropping such a value recurses that deep. The calling
@@ -25,11 +26,11 @@ const STACK_SIZE: usize = LARGE_STACK_SIZE;
 /// How often the calling thread looks for pending signals while the work runs.
 const SIGNAL_POLL: Duration = Duration::from_millis(50);
 
-/// What the worker thread of [`run`] tells the calling thread.
+/// What the worker thread of [`start`] tells the calling thread.
 pub enum Event {
     /// The work is over: its result is in the shared slot.
     Done,
-    /// A download for the retriever, which only the calling thread makes (see [`run`]).
+    /// A download for the retriever, which only the calling thread makes (see [`Task`]).
     Fetch(Fetch),
 }
 
@@ -39,21 +40,35 @@ pub struct Fetch {
     pub reply: mpsc::Sender<Result<Vec<u8>, RetrieveError>>,
 }
 
-/// Runs `f` with the GIL released, on a fresh thread with a [`STACK_SIZE`] stack, and
-/// returns its result. `f` may re-attach (`Python::attach`) to read or build Python objects.
-///
-/// Meanwhile the calling thread handles signals as Python code would: the exception a
-/// signal handler raises (`KeyboardInterrupt` for Ctrl-C, or whatever a `SIGALRM`
-/// handler raises) is returned as soon as it arrives, as upstream's pure-Python
-/// validation is abandoned where it stands. The work is cancelled then: it stops at its
-/// next check and its result is dropped.
-///
-/// The calling thread also makes the downloads of `retriever` that the work asks for:
-/// Python code then runs on a thread Python started, where an interrupt or the shutdown of
-/// the interpreter behaves as upstream's does. A thread of the library's own that waits
-/// to enter a finalizing interpreter is ended by Python 3.10 to 3.12 in a way Rust cannot
-/// unwind through, which aborts the process.
-pub fn run<T, F>(py: Python<'_>, retriever: Option<&PyRetriever>, f: F) -> PyResult<T>
+/// The result, or the panic that ended the work.
+type Slot<T> = Arc<Mutex<Option<std::thread::Result<PyResult<T>>>>>;
+
+/// Work running on a thread of its own, seen from the thread that started it.
+struct Worker<T> {
+    /// Out only while [`Worker::next`] waits on it.
+    receiver: Option<mpsc::Receiver<Event>>,
+    result: Slot<T>,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+/// What the work of a [`Worker`] did next.
+enum Step<T> {
+    Done(PyResult<T>),
+    Fetch(Fetch),
+}
+
+/// Work that [`start`] began.
+enum Started<T> {
+    Running(Worker<T>),
+    /// No thread could be started: the work ran on the calling thread.
+    Finished(PyResult<T>),
+}
+
+/// Starts `f` with the GIL released, on a fresh thread with a [`STACK_SIZE`] stack. `f` may
+/// re-attach (`Python::attach`) to read or build Python objects. The downloads of
+/// `retriever` are asked of the starting thread (see [`Task`]).
+fn start<T, F>(py: Python<'_>, retriever: Option<&PyRetriever>, f: F) -> PyResult<Started<T>>
 where
     T: Send + 'static,
     F: FnOnce() -> PyResult<T> + Send + 'static,
@@ -65,9 +80,8 @@ where
     // Where the standard library changed between versions, follow the running one.
     let minor = u32::from(py.version_info().minor);
     let cancel = Arc::new(AtomicBool::new(false));
-    let (sender, mut receiver) = mpsc::channel();
-    // The result, or the panic that ended the work.
-    let result: Arc<Mutex<Option<std::thread::Result<PyResult<T>>>>> = Arc::default();
+    let (sender, receiver) = mpsc::channel();
+    let result: Slot<T> = Arc::default();
     // Shared with the thread so that it is still here if the thread cannot start.
     let work = Arc::new(Mutex::new(Some(f)));
     let take = |work: &Mutex<Option<F>>| {
@@ -119,70 +133,226 @@ where
         // as upstream does all of it, as deeply as its stack allows. Signals wait until
         // the work is done, and the retriever is called right here.
         let f = take(&work);
-        return py.detach(move || {
+        return Ok(Started::Finished(py.detach(move || {
             let result =
                 run_cancellable(cancel, || with_python_minor(minor, || within_this_stack(f)));
             stay_out_if_finalizing();
             result
-        });
+        })));
     };
-    let _serving = retriever.map(|retriever| retriever.serve(sender));
-    loop {
-        // The receiver travels into the detached closure and back: it is `Send`, not `Sync`.
-        let (returned, received) = py.detach(move || {
-            let received = receiver.recv_timeout(SIGNAL_POLL);
-            stay_out_if_finalizing();
-            (receiver, received)
-        });
-        receiver = returned;
-        match received {
-            Ok(Event::Done) => {
-                let outcome = result.lock().unwrap_or_else(PoisonError::into_inner).take();
-                match outcome {
-                    Some(Ok(result)) => return result,
-                    // The work panicked: the panic propagates.
-                    Some(Err(panic)) => std::panic::resume_unwind(panic),
-                    None => break,
+    if let Some(retriever) = retriever {
+        retriever.serve(sender);
+    }
+    Ok(Started::Running(Worker {
+        receiver: Some(receiver),
+        result,
+        cancel,
+        handle: Some(handle),
+    }))
+}
+
+impl<T> Worker<T> {
+    /// Waits, with the GIL released, for the work to finish or to ask for a download.
+    ///
+    /// Meanwhile the calling thread handles signals as Python code would: the exception a
+    /// signal handler raises (`KeyboardInterrupt` for Ctrl-C, or whatever a `SIGALRM`
+    /// handler raises) is returned as soon as it arrives, as upstream's pure-Python
+    /// validation is abandoned where it stands. The work is cancelled then: it stops at its
+    /// next check and its result is dropped.
+    fn next(&mut self, py: Python<'_>) -> PyResult<Step<T>> {
+        loop {
+            // The receiver travels into the detached closure and back: it is `Send`, not
+            // `Sync`.
+            let receiver = self.receiver.take().expect("the work is waited for once");
+            let (receiver, received) = py.detach(move || {
+                let received = receiver.recv_timeout(SIGNAL_POLL);
+                stay_out_if_finalizing();
+                (receiver, received)
+            });
+            self.receiver = Some(receiver);
+            match received {
+                Ok(Event::Done) => break,
+                Ok(Event::Fetch(fetch)) => return Ok(Step::Fetch(fetch)),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Err(interrupted) = py.check_signals() {
+                        self.cancel.store(true, Ordering::Relaxed);
+                        return Err(interrupted);
+                    }
+                    let finished = self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+                        && self
+                            .result
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .is_none();
+                    if finished {
+                        // Ended without a result or a `Done` still to come.
+                        break;
+                    }
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            Ok(Event::Fetch(fetch)) => {
-                let Some(retriever) = retriever else {
-                    let _ = fetch.reply.send(Err(RetrieveError::new("no retriever")));
-                    continue;
-                };
-                let downloaded = retriever.call(py, &fetch.url);
-                // `KeyboardInterrupt` or `SystemExit` from the download ends the
-                // validation, as it propagates upstream.
-                if let Some(interrupted) = retriever.interrupt() {
-                    cancel.store(true, Ordering::Relaxed);
-                    return Err(interrupted);
-                }
-                let _ = fetch.reply.send(downloaded);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Err(interrupted) = py.check_signals() {
-                    cancel.store(true, Ordering::Relaxed);
-                    return Err(interrupted);
-                }
-                if handle.is_finished()
-                    && result
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .is_none()
-                {
-                    // Ended without a result or a `Done` still to come.
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        let outcome = self
+            .result
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match outcome {
+            Some(Ok(result)) => Ok(Step::Done(result)),
+            // The work panicked: the panic propagates.
+            Some(Err(panic)) => std::panic::resume_unwind(panic),
+            // The thread ended without a result: it panicked, and the panic propagates.
+            None => match self.handle.take().map(JoinHandle::join) {
+                Some(Err(panic)) => std::panic::resume_unwind(panic),
+                _ => Err(PyRuntimeError::new_err(
+                    "the validation thread ended without a result",
+                )),
+            },
         }
     }
-    // The thread ended without a result: it panicked, and the panic propagates.
-    match handle.join() {
-        Err(panic) => std::panic::resume_unwind(panic),
-        Ok(()) => Err(PyRuntimeError::new_err(
-            "the validation thread ended without a result",
-        )),
+}
+
+impl<T> Drop for Worker<T> {
+    /// Work nobody waits for any more stops at its next check.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Runs `f` as [`start`] does and returns its result. The work makes no downloads.
+pub fn run<T, F>(py: Python<'_>, f: F) -> PyResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> PyResult<T> + Send + 'static,
+{
+    let mut worker = match start(py, None, f)? {
+        Started::Finished(result) => return result,
+        Started::Running(worker) => worker,
+    };
+    loop {
+        match worker.next(py)? {
+            Step::Done(result) => return result,
+            Step::Fetch(fetch) => {
+                let _ = fetch.reply.send(Err(RetrieveError::new("no retriever")));
+            }
+        }
+    }
+}
+
+/// What a [`Task`]'s work hands back: builds its Python result on the calling thread.
+pub type Finish = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
+
+/// Validator work that may need `$ref` targets downloaded, driven from Python
+/// (`_stack.run`): `step()` waits for the work and returns the URL of the next download,
+/// or `None` once the work is done and `result()` has its result. The Python code then
+/// downloads with the package's retriever and passes the outcome to the next `step()`.
+///
+/// Downloads thus run in Python code called from Python code, on the calling thread, as
+/// upstream's do: an interrupt or the shutdown of the interpreter behaves as there. A
+/// thread that Python 3.10 to 3.12 end at shutdown while it downloads is unwound by
+/// `pthread_exit` through what is on its stack, which must not be the extension's code.
+#[pyclass(module = "openapi_spec_validator_rs._core", frozen)]
+pub struct Task {
+    state: Mutex<TaskState>,
+}
+
+enum TaskState {
+    Running {
+        worker: Worker<Finish>,
+        /// Where the outcome of the download asked for last goes.
+        reply: Option<mpsc::Sender<Result<Vec<u8>, RetrieveError>>>,
+    },
+    /// Taken by `step()` while it waits.
+    Busy,
+    Finished(PyResult<Finish>),
+    Closed,
+}
+
+impl Task {
+    /// Starts `f` as [`start`] does, serving the downloads of `retriever` to the caller.
+    pub fn start<F>(py: Python<'_>, retriever: Option<&PyRetriever>, f: F) -> PyResult<Self>
+    where
+        F: FnOnce() -> PyResult<Finish> + Send + 'static,
+    {
+        let state = match start(py, retriever, f)? {
+            Started::Running(worker) => TaskState::Running {
+                worker,
+                reply: None,
+            },
+            Started::Finished(result) => TaskState::Finished(result),
+        };
+        Ok(Self {
+            state: Mutex::new(state),
+        })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, TaskState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[pymethods]
+impl Task {
+    /// Passes on the outcome of the last download (`body`, or the `Exception` raised as
+    /// `error`), then waits for the work: returns the URL to download next, or `None` once
+    /// the work is done.
+    #[pyo3(signature = (body=None, error=None))]
+    fn step(
+        &self,
+        py: Python<'_>,
+        body: Option<Bound<'_, PyAny>>,
+        error: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Option<String>> {
+        let state = std::mem::replace(&mut *self.state(), TaskState::Busy);
+        let (mut worker, reply) = match state {
+            TaskState::Running { worker, reply } => (worker, reply),
+            TaskState::Busy => {
+                return Err(PyRuntimeError::new_err("the task is already running"));
+            }
+            other => {
+                *self.state() = other;
+                return Ok(None);
+            }
+        };
+        if let Some(reply) = reply {
+            let downloaded = match (body, error) {
+                (_, Some(error)) => Err(PyErr::from_value(error)),
+                (Some(body), None) => Ok(body),
+                (None, None) => Ok(py.None().into_bound(py)),
+            };
+            // The work is gone when it was cancelled meanwhile.
+            let _ = reply.send(answer(downloaded));
+        }
+        let (state, url) = match worker.next(py) {
+            Ok(Step::Fetch(fetch)) => (
+                TaskState::Running {
+                    worker,
+                    reply: Some(fetch.reply),
+                },
+                Ok(Some(fetch.url)),
+            ),
+            Ok(Step::Done(result)) => (TaskState::Finished(result), Ok(None)),
+            Err(error) => (TaskState::Closed, Err(error)),
+        };
+        *self.state() = state;
+        url
+    }
+
+    /// The result of the finished work (once only).
+    fn result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match std::mem::replace(&mut *self.state(), TaskState::Closed) {
+            TaskState::Finished(result) => result.and_then(|finish| finish(py)),
+            _ => Err(PyRuntimeError::new_err("the task has no result")),
+        }
+    }
+
+    /// Stops the work if it still runs.
+    fn close(&self) {
+        let state = std::mem::replace(&mut *self.state(), TaskState::Closed);
+        if let TaskState::Busy = state {
+            // `step()` is waiting on another thread and keeps the task.
+            *self.state() = TaskState::Busy;
+        }
     }
 }
 
@@ -216,8 +386,8 @@ fn finalizing() -> bool {
     unsafe { pyo3::ffi::Py_IsInitialized() == 0 }
 }
 
-/// `Python::attach` for the worker thread of [`run`]: when the call was cancelled, or the
-/// interpreter has started shutting down meanwhile (a daemon thread's validation), the
+/// `Python::attach` for the worker thread of [`start`]: when the call was cancelled, or
+/// the interpreter has started shutting down meanwhile (a daemon thread's validation), the
 /// work stops instead. Attaching to a finalizing interpreter blocks forever or ends the
 /// thread under Rust's feet, depending on the Python version.
 pub fn attach<R>(f: impl for<'py> FnOnce(Python<'py>) -> R) -> R {

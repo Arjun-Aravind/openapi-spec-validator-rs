@@ -93,15 +93,17 @@ class SpecValidator:
 
     def _errors(self, all_errors: bool) -> list[OpenAPIValidationError]:
         version = self.spec_version
-        errors = _core.validate(
-            self.schema,
-            f"{version.major}.{version.minor}",
-            self.base_uri,
-            all_errors,
-            handlers.retrieve,
-            _stack.spec_depth(),
-            _stack.limit(),
-            follow_root_ref=self._follow_root_ref,
+        errors = _stack.run(
+            _core.validate(
+                self.schema,
+                f"{version.major}.{version.minor}",
+                self.base_uri,
+                all_errors,
+                handlers.retrieve,
+                _stack.spec_depth(),
+                _stack.limit(),
+                follow_root_ref=self._follow_root_ref,
+            )
         )
         return [_from_core(error) for error in errors]
 

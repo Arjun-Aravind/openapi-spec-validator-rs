@@ -1,14 +1,23 @@
-"""Where upstream's validation would sit on the caller's Python stack.
+"""Running the extension's work from the caller's Python stack.
 
 Upstream validates in Python, so how deep a document can nest before it raises
 ``RecursionError`` depends on how deep its caller already is and on
 ``sys.getrecursionlimit()``. The extension reproduces that limit from these two numbers.
+
+Upstream also downloads ``http(s)://`` ``$ref`` targets in Python code on the calling
+thread, which :func:`run` does for the extension.
 """
 
 from __future__ import annotations
 
 import sys
 from types import FrameType
+from typing import TYPE_CHECKING, Any
+
+from openapi_spec_validator_rs import handlers
+
+if TYPE_CHECKING:
+    from openapi_spec_validator_rs._core import Task
 
 _PACKAGE = __name__.rpartition(".")[0]
 
@@ -66,3 +75,23 @@ def spec_depth() -> int:
 
 def limit() -> int:
     return sys.getrecursionlimit()
+
+
+def run(task: Task[Any]) -> Any:
+    """The result of ``task``, downloading here the ``$ref`` targets it asks for.
+
+    Only Python code is on this thread's stack while a download runs, as with upstream:
+    an interrupt, or the interpreter ending a daemon thread at shutdown, then unwinds
+    nothing of the extension's.
+    """
+    body = error = None
+    try:
+        while (url := task.step(body, error)) is not None:
+            body = error = None
+            try:
+                body = handlers.retrieve(url)
+            except Exception as exc:  # the reference is unresolvable, as upstream
+                error = exc
+        return task.result()
+    finally:
+        task.close()

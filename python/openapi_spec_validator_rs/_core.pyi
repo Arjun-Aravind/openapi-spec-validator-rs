@@ -1,9 +1,11 @@
 """Native module: document conversion, validation and the command line."""
 
 from collections.abc import Callable
-from typing import Any, Final, final
+from typing import Any, Final, Generic, TypeVar, final
 
-__all__ = ["CoreError", "__version__", "cli_main", "load", "validate", "validate_bytes"]
+_T = TypeVar("_T")
+
+__all__ = ["CoreError", "Task", "__version__", "cli_main", "load", "validate", "validate_bytes"]
 
 __version__: Final[str]
 
@@ -34,8 +36,19 @@ class CoreError:
     def context(self) -> list[CoreError]: ...
     def render(self) -> str: ...
 
-#: Fetches the document an ``http(s)://`` ``$ref`` points to; any ``Exception`` makes
-#: the reference unresolvable, anything else is re-raised by the calling function.
+@final
+class Task(Generic[_T]):
+    """Work running in the extension, finished by ``_stack.run``: ``step()`` passes on
+    the last download's ``body`` (or the ``error`` it raised) and returns the URL to
+    download next, or ``None`` once ``result()`` is ready."""
+
+    def step(self, body: object = None, error: BaseException | None = None) -> str | None: ...
+    def result(self) -> _T: ...
+    def close(self) -> None: ...
+
+#: Fetches the document an ``http(s)://`` ``$ref`` points to when no thread could be
+#: started (the task's caller downloads otherwise); any ``Exception`` makes the reference
+#: unresolvable, anything else is re-raised by the calling function.
 Retriever = Callable[[str], bytes]
 
 def validate(
@@ -47,7 +60,7 @@ def validate(
     python_depth: int | None = None,
     recursion_limit: int | None = None,
     follow_root_ref: bool = True,
-) -> list[CoreError]: ...
+) -> Task[list[CoreError]]: ...
 def validate_bytes(
     data: bytes,
     stream_name: str,
@@ -57,10 +70,10 @@ def validate_bytes(
     retriever: Retriever | None = None,
     python_depth: int | None = None,
     recursion_limit: int | None = None,
-) -> list[CoreError]: ...
+) -> Task[list[CoreError]]: ...
 def load(data: bytes, stream_name: str) -> Any: ...
 def cli_main(
     args: list[str],
     stdin: bytes | None = None,
     retriever: Retriever | None = None,
-) -> tuple[int, str, str, bool]: ...
+) -> Task[tuple[int, str, str, bool]]: ...

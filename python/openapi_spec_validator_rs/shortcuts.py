@@ -186,15 +186,17 @@ def _validate_bytes(
     if cls is not None:
         version = f"{cls.spec_version.major}.{cls.spec_version.minor}"
     try:
-        errors = _core.validate_bytes(
-            data,
-            stream_name,
-            base_uri,
-            version,
-            False,
-            handlers.retrieve,
-            _stack.spec_depth(),
-            _stack.limit(),
+        errors = _stack.run(
+            _core.validate_bytes(
+                data,
+                stream_name,
+                base_uri,
+                version,
+                False,
+                handlers.retrieve,
+                _stack.spec_depth(),
+                _stack.limit(),
+            )
         )
     except TypeError:
         # Version detection failed on a malformed document. Detect again in Python so

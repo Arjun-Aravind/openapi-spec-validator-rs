@@ -3,7 +3,7 @@
 import sys
 from collections.abc import Sequence
 
-from openapi_spec_validator_rs import handlers
+from openapi_spec_validator_rs import _stack, handlers
 from openapi_spec_validator_rs._core import cli_main
 
 
@@ -17,7 +17,7 @@ def main(args: Sequence[str] | None = None) -> None:
     if args is None:
         args = sys.argv[1:]
     args = list(args)
-    code, out, err, ran = cli_main(args, _replaced_stdin(args), handlers.retrieve)
+    code, out, err, ran = _stack.run(cli_main(args, _replaced_stdin(args), handlers.retrieve))
     if out:
         sys.stdout.write(out)
     if err:

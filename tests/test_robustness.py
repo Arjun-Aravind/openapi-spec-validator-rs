@@ -12,7 +12,7 @@ from typing import Any
 
 import openapi_spec_validator_rs as osv
 import pytest
-from openapi_spec_validator_rs import SpecReadError, handlers
+from openapi_spec_validator_rs import SpecReadError, _stack, handlers
 
 upstream_readers = pytest.importorskip("openapi_spec_validator.readers")
 
@@ -184,7 +184,7 @@ def test_keyboard_interrupt_stops_the_work(make_spec) -> None:
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
-            osv._core.validate_bytes(text.encode(), "<x>", "", None, False, None)
+            _stack.run(osv._core.validate_bytes(text.encode(), "<x>", "", None, False, None))
     finally:
         timer.cancel()
     time.sleep(0.3)
