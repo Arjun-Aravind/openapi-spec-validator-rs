@@ -10,12 +10,10 @@ mod stack;
 
 use std::sync::Arc;
 
-use clap::Parser;
 use openapi_spec_validator_rs::{
     DetectError, ErrorMode, LoadError, Options, Outcome, PythonStack, Retrieve, SpecVersion,
     ValidationError, detect_version, with_python_stack,
 };
-use openapi_spec_validator_rs_cli::Args;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
@@ -162,11 +160,7 @@ fn validate(
     let (outcome, objects) = stack::run(py, move || {
         let (value, objects) = stack::attach(|py| to_value(spec.bind(py)))?;
         let outcome = with_python_stack(stack, || {
-            if follow_root_ref {
-                openapi_spec_validator_rs::validate(&value, &options)
-            } else {
-                openapi_spec_validator_rs::validate_as_given(&value, &options)
-            }
+            openapi_spec_validator_rs::validate_root_ref(&value, &options, follow_root_ref)
         });
         // Freeing a large document takes a while too: do it before re-attaching.
         drop(value);
@@ -289,21 +283,21 @@ fn cli_main(
         let retriever = worker_retriever;
         let argv =
             std::iter::once("openapi-spec-validator-rs").chain(args.iter().map(String::as_str));
-        let ran = Args::try_parse_from(argv).is_ok();
+        let ran = openapi_spec_validator_rs_cli::python_command_parses(argv);
         let mut out = Vec::new();
         let mut err = Vec::new();
         let fetch = retriever
             .as_ref()
             .map(|retriever| Arc::clone(retriever) as Arc<dyn Retrieve>);
         let code = match stdin {
-            Some(data) => openapi_spec_validator_rs_cli::run_with_stdin(
+            Some(data) => openapi_spec_validator_rs_cli::run_python_command(
                 &args,
                 &mut std::io::Cursor::new(&*data),
                 fetch,
                 &mut out,
                 &mut err,
             ),
-            None => openapi_spec_validator_rs_cli::run_with_stdin(
+            None => openapi_spec_validator_rs_cli::run_python_command(
                 &args,
                 &mut std::io::stdin(),
                 fetch,

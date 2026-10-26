@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use openapi_spec_validator_rs::{
     ContextHandle, ErrorMode, LoadError, Options, Outcome, Retrieve, SpecVersion, TextErrors,
     ValidationError, best_match, load_text, on_large_stack_thread, read_text_until_unreadable,
@@ -101,9 +101,74 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    run_command(args, stdin, retriever, out, err, true)
+}
+
+/// [`run_with_stdin`] for the Python package's command line, which follows the
+/// interpreter it runs in: like upstream's, it has no `--python-version` option.
+///
+/// Not a supported API: used by the Python bindings.
+#[doc(hidden)]
+pub fn run_python_command<I, T>(
+    args: I,
+    stdin: &mut (dyn Read + Send),
+    retriever: Option<Arc<dyn Retrieve>>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_command(args, stdin, retriever, out, err, false)
+}
+
+/// Whether `args` parse as the Python package's command line (see [`run_python_command`]).
+///
+/// Not a supported API: used by the Python bindings.
+#[doc(hidden)]
+pub fn python_command_parses<I, T>(args: I) -> bool
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    parse(args, false).is_ok()
+}
+
+fn parse<I, T>(args: I, python_version_option: bool) -> Result<Args, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let argv = std::iter::once(OsString::from("openapi-spec-validator-rs"))
         .chain(args.into_iter().map(Into::into));
-    let args = match Args::try_parse_from(argv) {
+    let mut command = Args::command();
+    if !python_version_option {
+        command = command.mut_arg("python_version", |arg| arg.hide(true));
+    }
+    let args = Args::from_arg_matches(&command.clone().try_get_matches_from(argv)?)?;
+    if !python_version_option && args.python_version.is_some() {
+        return Err(command.error(
+            clap::error::ErrorKind::UnknownArgument,
+            "unexpected argument '--python-version' found",
+        ));
+    }
+    Ok(args)
+}
+
+fn run_command<I, T>(
+    args: I,
+    stdin: &mut (dyn Read + Send),
+    retriever: Option<Arc<dyn Retrieve>>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    python_version_option: bool,
+) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args = match parse(args, python_version_option) {
         Ok(args) => args,
         Err(error) => {
             let rendered = error.render().to_string();

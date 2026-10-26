@@ -14,7 +14,6 @@ name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-clap.workspace = true
 mimalloc.workspace = true
 openapi-spec-validator-rs.workspace = true
 openapi-spec-validator-rs-cli.workspace = true
