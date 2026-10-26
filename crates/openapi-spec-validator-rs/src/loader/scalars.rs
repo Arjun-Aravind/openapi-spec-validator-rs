@@ -7,10 +7,7 @@ use super::bigint::BigInt;
 use super::pyfmt::{lower, repr_str, repr_str_200, strip, unicode_encode_error};
 use crate::pyobj::decimal_to_ascii;
 
-/// `sys.get_int_max_str_digits()` default.
-const MAX_STR_DIGITS: usize = 4300;
-
-pub(super) const INT_TO_STR_LIMIT: &str = "Exceeds the limit (4300 digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit";
+use crate::pyobj::MAX_STR_DIGITS;
 
 const INDEX_ERROR: &str = "string index out of range";
 
@@ -98,9 +95,7 @@ pub(super) fn py_int(s: &str, base: u32) -> Result<BigInt, String> {
         .count();
     // CPython checks the digit limit before looking at what follows the digits.
     if !base.is_power_of_two() && run > MAX_STR_DIGITS {
-        return Err(format!(
-            "Exceeds the limit ({MAX_STR_DIGITS} digits) for integer string conversion: value has {run} digits; use sys.set_int_max_str_digits() to increase the limit"
-        ));
+        return Err(crate::pyobj::int_from_str_limit(run));
     }
     if run == 0 || run != t.len() {
         return Err(invalid());

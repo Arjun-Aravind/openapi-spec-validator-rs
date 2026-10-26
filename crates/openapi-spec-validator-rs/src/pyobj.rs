@@ -189,6 +189,54 @@ pub(crate) fn not_a_container(value: &Value) -> String {
     }
 }
 
+/// The `TypeError` of a regex search in a `type_name` object; Python 3.10 leaves out the type.
+pub(crate) fn not_a_string(type_name: &str) -> String {
+    if crate::context::python_minor() <= 10 {
+        "expected string or bytes-like object".to_owned()
+    } else {
+        format!("expected string or bytes-like object, got '{type_name}'")
+    }
+}
+
+/// The `TypeError` of `text["key"]`; Python 3.10 leaves out the key's type.
+pub(crate) fn string_indices() -> String {
+    if crate::context::python_minor() <= 10 {
+        "string indices must be integers".to_owned()
+    } else {
+        "string indices must be integers, not 'str'".to_owned()
+    }
+}
+
+/// `sys.get_int_max_str_digits()` default.
+pub(crate) const MAX_STR_DIGITS: usize = 4300;
+
+/// The limit in the int/str conversion errors; Python 3.10 leaves out its unit.
+fn int_limit() -> String {
+    if crate::context::python_minor() <= 10 {
+        format!("({MAX_STR_DIGITS})")
+    } else {
+        format!("({MAX_STR_DIGITS} digits)")
+    }
+}
+
+/// The `ValueError` of `int(text)` for `digits` digits, beyond the conversion limit.
+pub(crate) fn int_from_str_limit(digits: usize) -> String {
+    format!(
+        "Exceeds the limit {} for integer string conversion: value has {digits} digits; \
+         use sys.set_int_max_str_digits() to increase the limit",
+        int_limit()
+    )
+}
+
+/// The `ValueError` of `str(int)` beyond the conversion limit.
+pub(crate) fn int_to_str_limit() -> String {
+    format!(
+        "Exceeds the limit {} for integer string conversion; \
+         use sys.set_int_max_str_digits() to increase the limit",
+        int_limit()
+    )
+}
+
 /// The `ZeroDivisionError` message, `before_3_14` until Python 3.14 unified them.
 pub(crate) fn zero_division(before_3_14: &str) -> String {
     if crate::context::python_minor() < 14 {

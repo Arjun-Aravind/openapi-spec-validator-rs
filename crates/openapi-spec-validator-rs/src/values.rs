@@ -773,7 +773,7 @@ impl<'d> Oas30<'d, '_, '_> {
         let Value::Object(discriminator) = discriminator else {
             // `discriminator["propertyName"]`
             return Err(Crash(match discriminator {
-                Value::String(_) => "string indices must be integers, not 'str'".to_owned(),
+                Value::String(_) => crate::pyobj::string_indices(),
                 Value::Array(_) => "list indices must be integers or slices, not str".to_owned(),
                 other => format!("'{}' object is not subscriptable", python_type_name(other)),
             }));

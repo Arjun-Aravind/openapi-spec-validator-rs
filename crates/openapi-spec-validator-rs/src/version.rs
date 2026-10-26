@@ -95,9 +95,7 @@ pub fn detect_version(spec: &Value) -> Result<SpecVersion, DetectError> {
             },
             Value::String(s) => {
                 if s.contains(keyword) {
-                    return Err(DetectError::TypeError(
-                        "string indices must be integers, not 'str'".to_owned(),
-                    ));
+                    return Err(DetectError::TypeError(crate::pyobj::string_indices()));
                 }
                 continue;
             }
@@ -114,9 +112,8 @@ pub fn detect_version(spec: &Value) -> Result<SpecVersion, DetectError> {
             }
         };
         let Value::String(version_str) = version_value else {
-            return Err(DetectError::TypeError(format!(
-                "expected string or bytes-like object, got '{}'",
-                python_type_name(version_value)
+            return Err(DetectError::TypeError(crate::pyobj::not_a_string(
+                python_type_name(version_value),
             )));
         };
         if parse_major_minor(version_str) == Some(version.major_minor()) {

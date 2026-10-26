@@ -10,7 +10,6 @@ use super::bigint::BigInt;
 use super::compose::{Node, NodeKind};
 use super::construct::{Graph, Obj};
 use super::pyfmt::json_float;
-use super::scalars::INT_TO_STR_LIMIT;
 
 const CIRCULAR: &str = "Circular reference detected";
 pub(super) const RECURSION: &str = "maximum recursion depth exceeded while encoding a JSON object";
@@ -329,7 +328,7 @@ impl Encoder<'_> {
             Obj::BigInt(id) => {
                 let digits = self.graph.bigints[id as usize].to_decimal();
                 if digits.trim_start_matches('-').len() > 4300 {
-                    return Err(INT_TO_STR_LIMIT.to_owned());
+                    return Err(crate::pyobj::int_to_str_limit());
                 }
                 digits
             }
@@ -383,7 +382,7 @@ fn big_value(n: &BigInt) -> Result<Value, String> {
     }
     let digits = n.to_decimal();
     if digits.trim_start_matches('-').len() > 4300 {
-        return Err(INT_TO_STR_LIMIT.to_owned());
+        return Err(crate::pyobj::int_to_str_limit());
     }
     // Beyond f64's range serde_json reports "number out of range"; NaN/inf-like values have
     // no `Value` representation, so they become null like infinite floats do.

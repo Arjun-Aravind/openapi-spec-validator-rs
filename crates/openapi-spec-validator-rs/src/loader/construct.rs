@@ -146,7 +146,7 @@ impl Constructor<'_> {
                 let s = self.construct_scalar(node, 0)?;
                 // The regex is matched against `node.value`, which is a list for mappings.
                 if !matches!(self.kind(node), NodeKind::Scalar(_)) {
-                    return Err("expected string or bytes-like object, got 'list'".to_owned());
+                    return Err(crate::pyobj::not_a_string("list"));
                 }
                 match scalars::timestamp_value(self.scalar_str(s))? {
                     Timestamp::Date => Obj::Date,

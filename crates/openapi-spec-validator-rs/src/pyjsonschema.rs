@@ -69,9 +69,7 @@ impl Class {
             Value::Bool(_) => return Ok(self),
             Value::Object(map) => map,
             Value::String(s) if s.contains("$schema") => {
-                return Err(Crash(
-                    "string indices must be integers, not 'str'".to_owned(),
-                ));
+                return Err(Crash(crate::pyobj::string_indices()));
             }
             Value::Array(items) if items.iter().any(|i| i.as_str() == Some("$schema")) => {
                 return Err(Crash(
