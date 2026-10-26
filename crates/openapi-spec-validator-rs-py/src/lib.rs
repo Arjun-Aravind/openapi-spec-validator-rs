@@ -322,6 +322,14 @@ fn cli_main(
     Ok(result)
 }
 
+/// The JSON text of the meta-schema of `version` (`"2.0"` to `"3.2"`), as upstream ships it.
+#[pyfunction]
+fn _meta_schema(version: &str) -> PyResult<&'static str> {
+    Ok(openapi_spec_validator_rs::meta_schema_text(parse_version(
+        version,
+    )?))
+}
+
 /// Raises upstream's `ImportError` once the interpreter is shutting down, for Python code
 /// that would otherwise fail differently before reaching the extension.
 #[pyfunction]
@@ -362,6 +370,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(_check_interpreter, m)?)?;
     m.add_function(wrap_pyfunction!(_check_finalizing, m)?)?;
+    m.add_function(wrap_pyfunction!(_meta_schema, m)?)?;
     m.add_class::<CoreError>()?;
     m.add_function(wrap_pyfunction!(validate, m)?)?;
     m.add_function(wrap_pyfunction!(validate_bytes, m)?)?;

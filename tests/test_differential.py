@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import os
 import sys
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -388,3 +389,44 @@ def test_recursion_limit_through_the_api(version: str, entry: str, frames_above:
         assert _gives_up(osv, entry, _nested_spec(version, high), frames_above)
     finally:
         sys.setrecursionlimit(previous)
+
+
+def test_settings_schemas_and_finders_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Upstream modules this package offers for imports' sake.
+    from openapi_spec_validator import schemas as up_schemas
+    from openapi_spec_validator import settings as up_settings
+    from openapi_spec_validator.versions import consts as up_consts
+    from openapi_spec_validator.versions import finders as up_finders
+
+    from openapi_spec_validator_rs import schemas, settings
+    from openapi_spec_validator_rs.versions import VERSIONS, finders
+
+    for name in ["schema_v2", "schema_v30", "schema_v31", "schema_v32", "schema_v3"]:
+        assert getattr(schemas, name) == dict(getattr(up_schemas, name)), name
+    assert schemas.schema_v3 is schemas.schema_v32
+
+    for spec in [{"openapi": "3.0.3"}, {"openapi": "3.1"}, {"swagger": "2.0"}, {"openapi": "4"}]:
+        try:
+            expected = str(up_finders.SpecVersionFinder(up_consts.VERSIONS).find(spec))
+        except Exception as error:  # noqa: BLE001
+            expected = type(error).__name__
+        try:
+            actual = str(finders.SpecVersionFinder(VERSIONS).find(spec))
+        except Exception as error:  # noqa: BLE001
+            actual = type(error).__name__
+        assert actual == expected, spec
+
+    for value in ["7", "-1", "x", "JSONSCHEMA-rs ", "nope"]:
+        monkeypatch.setenv("OPENAPI_SPEC_VALIDATOR_RESOLVED_CACHE_MAXSIZE", value)
+        monkeypatch.setenv("OPENAPI_SPEC_VALIDATOR_SCHEMA_VALIDATOR_BACKEND", value)
+        with warnings.catch_warnings(record=True) as theirs:
+            warnings.simplefilter("always")
+            up = up_settings.OpenAPISpecValidatorSettings()
+        with warnings.catch_warnings(record=True) as ours:
+            warnings.simplefilter("always")
+            mine = settings.OpenAPISpecValidatorSettings()
+        assert (mine.resolved_cache_maxsize, mine.schema_validator_backend) == (
+            up.resolved_cache_maxsize,
+            up.schema_validator_backend,
+        )
+        assert [str(w.message) for w in ours] == [str(w.message) for w in theirs]

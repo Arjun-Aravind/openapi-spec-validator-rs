@@ -39,6 +39,16 @@ static SCHEMA_V20: LazyLock<Value> = LazyLock::new(|| {
 });
 static SCHEMA_V30: LazyLock<Value> =
     LazyLock::new(|| bundled(include_str!("../resources/schemas/v3.0/schema.json")));
+
+/// The meta-schema of `version` as upstream ships it (`resources/schemas/v*/schema.json`).
+pub(crate) fn bundled_document_schema(version: SpecVersion) -> &'static str {
+    match version {
+        SpecVersion::V2_0 => include_str!("../resources/schemas/v2.0/schema.json"),
+        SpecVersion::V3_0 => include_str!("../resources/schemas/v3.0/schema.json"),
+        SpecVersion::V3_1 => include_str!("../resources/schemas/v3.1/schema.json"),
+        SpecVersion::V3_2 => include_str!("../resources/schemas/v3.2/schema.json"),
+    }
+}
 static SCHEMA_V31: LazyLock<Value> =
     LazyLock::new(|| bundled(include_str!("../resources/schemas/v3.1/schema.json")));
 static SCHEMA_V32: LazyLock<Value> =

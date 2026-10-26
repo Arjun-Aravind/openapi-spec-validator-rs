@@ -140,6 +140,15 @@ fn default_retriever() -> Option<Arc<dyn Retrieve>> {
     None
 }
 
+/// The JSON text of the meta-schema documents of `version` are checked against, as
+/// upstream ships it.
+///
+/// Not a supported API: used by the Python package's `schemas` module.
+#[doc(hidden)]
+pub fn meta_schema_text(version: SpecVersion) -> &'static str {
+    meta::bundled_document_schema(version)
+}
+
 /// Validates an already-parsed spec document.
 ///
 /// Validation recurses with the document's nesting and along `$ref` chains, so it runs
